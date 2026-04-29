@@ -1,0 +1,52 @@
+데이터의 특징: task는 목표, history는 목표를 이루기 위해 지금까지 한 과정.
+모델은 에이전트가 다음에 해야할 행동을 맞추는 것임.
+특이한 점은 task의 텍스트들이 여러가지 feature 토큰으로 이루어져 있고, history에 그것들중 몇몇개가 그대로 나옴.
+이미 수행한 행동은 정답이 되지 않을 가능성이 높기 때문에 (task의 토큰집합)-(history의 토큰집합) 연산의 결과 토큰집합에서
+답이 연관되어 있을 가능성이 높다. 연산 후 토큰집합의 핵심 토큰과 candiate_elements의 토큰집합의 유사도를 보고 싶다.
+
+1. task 칼럼의 문자열 토큰화&불용어 제거한 뒤 넘파이 배열에 저장
+2. history 칼럼의 문자열 토큰화& 불용어 제거한 뒤 넘파이 배열에 저장
+3. cleaned_html 칼럼의 문자열 토큰화 & 불용어 제거한 뒤 넘파이 배열에 저장
+4. candiate_elements 칼럼의 문자열 토큰화 & 불용어 제거한 뒤 넘파이 배열에 저장
+train_preprocessing.py 파일 만들어서 해당 작업 수행하고, 전처리 한 내용들 다 합쳐서 preprocessed_train.csv파일 만들어서
+id, site_token, task, history, cleaned_html, candidate_element, op, target_id, value 칼럼 구조로 만들어.
+1~4과정에서 어떤 알고리즘을 통해 수행했는지 알려주고 코드에도 자세히 주석 달아.
+src폴더의 build_submission_v2.py 파일이 전처리 후 모델 학습까지 했던 코드인데 참고해서 전처리 진행해.
+모델 학습은 다른 새로운 파일 만들어서 할 거니까 일단 전처리하는 코드만 짜
+
+전체적으로 숫자는 없애면 안될 것 같다. 
+
+preprocessed_train.csv 파일을 보니 숫자가 많이 지워지고, CLICK, SELECT 와 같은 단어들도 지워진 걸 알 수 있음.
+-> CLICK, SELECT는 남겨놓아야 하지 않을까? -> 수정해보자.
+cleaned_html: 닫는 태그 없애기 -> 수정해보자.
+candidate_elements: JSON형식 데이터를 feature를 살려가며 인코딩하는 방법은 없을까?
+-> gemini에게 물어보니 1.구조적 평탄화, 2.필드별 분리 인코딩 추천해줌
+
+ [최종 고도화 실행 계획 보고]
+
+  1. 목표
+   * 의미 중심의 초경량 구조적 전처리: 모델이 날짜, 숫자, 태그 속성에만 집중할 수 있도록 불필요한 모든 문법적 요소를
+     제거합니다.
+
+  2. 세부 처리 로직 (통합)
+   * [HTML/JSON 공통]
+       * 닫는 태그 제거: </[a-z0-9]+> 패턴을 사용하여 모든 닫는 태그를 삭제합니다.
+       * Backend ID 제거: backend_nodeid="[0-9]+" 속성을 삭제합니다.
+       * 숫자 및 날짜 보존: 정규식을 [A-Za-z0-9/._-]+로 수정하여 2026-05-26, 1,500.00 등 보존.
+   * [칼럼별 특화]
+       * Task/History: CLICK, TYPE, SELECT 보존 및 숫자 보존.
+       * Candidate Elements: [CAND] tag:X text:Y attr_name:Z [SEP] 형식 유지 (닫는 태그 미포함).
+       * Cleaned HTML: 닫는 태그와 노드 ID가 제거된 상태에서, 주요 상호작용 요소(button, input 등) 위주로 텍스트를
+         구성합니다.
+
+  3. 기대 효과
+   * Token Efficiency: 텍스트 길이가 대폭 감소하여 언어 모델의 컨텍스트 제한(Context Window) 안에 더 많은 정보를 넣을 수
+     있습니다.
+   * Signal-to-Noise Ratio 향상: 모델이 </div> 같은 기호 대신 tag:button과 같은 의미론적 정보에 더 강력하게 반응합니다.
+
+  4. 작업 순서
+   * 단계 A: HyoungGyu/train_preprocessing.py에 닫는 태그 제거(re.sub(r'</[^>]+>', '', html)) 로직 추가.
+   * 단계 B: 최종 스크립트 실행 및 preprocessed_train_v4.csv 생성.
+   * 단계 C: 전처리 전/후의 평균 문자열 길이를 비교하여 얼마나 최적화되었는지 보고.
+
+   
