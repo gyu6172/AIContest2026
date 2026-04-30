@@ -1,0 +1,26 @@
+# Large data files
+*.csv
+
+# Model weights and checkpoints
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.joblib
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and tool specific
+.claude/
+.vscode/
+.ipynb_checkpoints/
+
+# Project specific outputs/logs
+wandb/
+notebooks/viz_out/
+HyunJin/outputs/
+HyunJin/lora_model/
+HyunJin/unsloth_compiled_cache/
