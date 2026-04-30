@@ -1,0 +1,18 @@
+# Model weights and checkpoints
+*.safetensors
+*.pt
+*.pth
+*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE and tool specific
+.claude/
+.vscode/
+
+# Project specific data/outputs if large
+HyunJin/outputs/
+HyunJin/lora_model/
+HyunJin/unsloth_compiled_cache/
