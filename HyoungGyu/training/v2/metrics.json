@@ -1,0 +1,10 @@
+{
+  "target_id_acc": 0.7599418040737148,
+  "target_top3_acc": 0.8899127061105723,
+  "target_top5_acc": 0.9379243452958292,
+  "op_acc": 0.9442289039767217,
+  "value_acc": 0.8666343355965083,
+  "all_match_acc": 0.6707080504364694,
+  "op_acc_given_target": 0.9802169751116784,
+  "value_acc_given_target": 0.8825781748564135
+}

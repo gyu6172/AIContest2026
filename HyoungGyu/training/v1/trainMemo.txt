@@ -1,0 +1,7 @@
+전처리된 .csv파일을 통해 입력데이터(id, site_token, task, history, cleaned_html, candidate_html)와
+출력데이터(op, target_id, value)를 예측하는 모델을 훈련하는 코드를 짜줘.
+학습에는 시간이 오래걸리니까 .ipynb 형식으로 생성하고, colab에서 훈련시킬거야.
+
+history에 step1, step2 이런 것들이 있는데
+step1의 다음 순서는 step2 이런 식으로 학습할 수도 있지 않을까? -> 훈련데이터가 많아지는 효과가 생긴다?
+
