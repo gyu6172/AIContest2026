@@ -1,3 +1,5 @@
+# somenna	0.5917	0.7287	0.9520	0.8449	98.6%
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +18,6 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
-
 RNG_SEED = 42
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -24,9 +25,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def find_project_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
-        if (candidate / "data").exists() and (candidate / "HyoungGyu" / "preprocessing").exists():
+        if (candidate / "data").exists() and (
+            candidate / "HyoungGyu" / "preprocessing"
+        ).exists():
             return candidate
-    raise FileNotFoundError("Could not find project root containing data/ and HyoungGyu/preprocessing/.")
+    raise FileNotFoundError(
+        "Could not find project root containing data/ and HyoungGyu/preprocessing/."
+    )
 
 
 ROOT = find_project_root(SCRIPT_DIR)
@@ -45,7 +50,9 @@ TEST_ROW_OUTPUT = OUTPUT_DIR / "preprocessed_test_custom_v6.csv"
 TEST_CAND_OUTPUT = OUTPUT_DIR / "preprocessed_test_candidates_custom_v6.csv"
 
 SUBMISSION_PATH = SCRIPT_DIR / "submission.csv"
-WORKFLOW_ONLY_SUBMISSION_PATH = SCRIPT_DIR / "submission_workflow_only_rawweb_garbage.csv"
+WORKFLOW_ONLY_SUBMISSION_PATH = (
+    SCRIPT_DIR / "submission_workflow_only_rawweb_garbage.csv"
+)
 
 TAG_TOKEN_VOCAB_SIZE = 450
 TOP_TAG_FEATURES = 40
@@ -115,8 +122,27 @@ TYPE_HINTS = {
     "title",
     "url",
 }
-SELECT_HINTS = {"choose", "dropdown", "locale", "mark", "pick", "priority", "select", "status"}
-CLICK_HINTS = {"approve", "cancel", "click", "open", "publish", "queue", "save", "send", "submit"}
+SELECT_HINTS = {
+    "choose",
+    "dropdown",
+    "locale",
+    "mark",
+    "pick",
+    "priority",
+    "select",
+    "status",
+}
+CLICK_HINTS = {
+    "approve",
+    "cancel",
+    "click",
+    "open",
+    "publish",
+    "queue",
+    "save",
+    "send",
+    "submit",
+}
 
 
 def as_text(value: Any) -> str:
@@ -158,7 +184,9 @@ def safe_ratio(num: float, den: float) -> float:
 
 
 def read_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, encoding="utf-8", encoding_errors="replace", low_memory=False)
+    return pd.read_csv(
+        path, encoding="utf-8", encoding_errors="replace", low_memory=False
+    )
 
 
 def load_train_data() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -189,9 +217,13 @@ def load_train_data() -> tuple[pd.DataFrame, pd.DataFrame]:
             )["site_token"].astype(str)
         )
         train_only_mask = ~row_df["site_token_raw"].astype(str).isin(test_sites)
-        train_only_sites = sorted(row_df.loc[train_only_mask, "site_token_raw"].astype(str).unique())
+        train_only_sites = sorted(
+            row_df.loc[train_only_mask, "site_token_raw"].astype(str).unique()
+        )
         if train_only_sites:
-            print(f"dropped train-only sites: {train_only_sites} rows={int(train_only_mask.sum())}")
+            print(
+                f"dropped train-only sites: {train_only_sites} rows={int(train_only_mask.sum())}"
+            )
             row_df = row_df.loc[~train_only_mask].copy()
 
     valid_ids = set(row_df["id"].astype(str))
@@ -210,7 +242,9 @@ def load_train_data() -> tuple[pd.DataFrame, pd.DataFrame]:
         "target_tag_is_unique",
     ]:
         if col in row_df.columns:
-            row_df[col] = pd.to_numeric(row_df[col], errors="coerce").fillna(0).astype(int)
+            row_df[col] = (
+                pd.to_numeric(row_df[col], errors="coerce").fillna(0).astype(int)
+            )
     for col in [
         "candidate_idx",
         "candidate_tag_count_in_row",
@@ -225,7 +259,9 @@ def load_train_data() -> tuple[pd.DataFrame, pd.DataFrame]:
         "html_total_steps",
     ]:
         if col in cand_df.columns:
-            cand_df[col] = pd.to_numeric(cand_df[col], errors="coerce").fillna(0).astype(int)
+            cand_df[col] = (
+                pd.to_numeric(cand_df[col], errors="coerce").fillna(0).astype(int)
+            )
     if "candidate_tag_frac_in_row" in cand_df.columns:
         cand_df["candidate_tag_frac_in_row"] = pd.to_numeric(
             cand_df["candidate_tag_frac_in_row"], errors="coerce"
@@ -247,7 +283,14 @@ def build_test_custom_from_source() -> tuple[pd.DataFrame, pd.DataFrame, Path]:
         )
 
     test_source = read_csv(source_path)
-    base_cols = ["id", "site_token", "task", "history", "cleaned_html", "candidate_elements"]
+    base_cols = [
+        "id",
+        "site_token",
+        "task",
+        "history",
+        "cleaned_html",
+        "candidate_elements",
+    ]
     missing = [col for col in base_cols if col not in test_source.columns]
     if missing:
         raise ValueError(f"Test source {source_path} is missing columns: {missing}")
@@ -298,14 +341,18 @@ def subset_candidates(cand_df: pd.DataFrame, ids: np.ndarray) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def build_token_vocab(row_df: pd.DataFrame, size: int = TAG_TOKEN_VOCAB_SIZE) -> list[str]:
+def build_token_vocab(
+    row_df: pd.DataFrame, size: int = TAG_TOKEN_VOCAB_SIZE
+) -> list[str]:
     counter: Counter[str] = Counter()
     for value in row_df["task_tokens_json"].fillna("[]"):
         counter.update(json_loads(value, []))
     return [token for token, _ in counter.most_common(size)]
 
 
-def build_category_maps(row_df: pd.DataFrame, cand_df: pd.DataFrame) -> dict[str, dict[str, int]]:
+def build_category_maps(
+    row_df: pd.DataFrame, cand_df: pd.DataFrame
+) -> dict[str, dict[str, int]]:
     sources = {
         "site_key": row_df["site_key"],
         "html_type": row_df["html_type"],
@@ -358,19 +405,32 @@ def build_tag_features(
         task_text = as_text(getattr(row, "task_clean"))
         tag_counts = parse_tag_counts(getattr(row, "candidate_tag_counts_json"))
         features: dict[str, float | int] = {
-            "site_idx": encode_value(getattr(row, "site_key"), category_maps["site_key"]),
+            "site_idx": encode_value(
+                getattr(row, "site_key"), category_maps["site_key"]
+            ),
             "site_freq": float(site_freq.get(as_text(getattr(row, "site_key")), 0.0)),
-            "html_type_idx": encode_value(getattr(row, "html_type"), category_maps["html_type"]),
+            "html_type_idx": encode_value(
+                getattr(row, "html_type"), category_maps["html_type"]
+            ),
             "is_workflow": int(getattr(row, "is_workflow")),
             "history_step_count": int(getattr(row, "history_step_count")),
-            "history_last_op_idx": encode_value(getattr(row, "history_last_op"), category_maps["history_last_op"]),
+            "history_last_op_idx": encode_value(
+                getattr(row, "history_last_op"), category_maps["history_last_op"]
+            ),
             "html_current_step": int(getattr(row, "html_current_step")),
             "html_total_steps": int(getattr(row, "html_total_steps")),
             "html_step_remaining": int(getattr(row, "html_step_remaining")),
-            "html_progress": safe_ratio(int(getattr(row, "html_current_step")), int(getattr(row, "html_total_steps"))),
+            "html_progress": safe_ratio(
+                int(getattr(row, "html_current_step")),
+                int(getattr(row, "html_total_steps")),
+            ),
             "n_candidates": int(getattr(row, "n_candidates")),
-            "candidate_unique_tag_count": int(getattr(row, "candidate_unique_tag_count")),
-            "candidate_max_same_tag_count": int(getattr(row, "candidate_max_same_tag_count")),
+            "candidate_unique_tag_count": int(
+                getattr(row, "candidate_unique_tag_count")
+            ),
+            "candidate_max_same_tag_count": int(
+                getattr(row, "candidate_max_same_tag_count")
+            ),
             "task_token_count": len(task_tokens),
             "task_char_len": len(task_text),
             "task_number_count": len(DECIMAL_RE.findall(task_text)),
@@ -391,13 +451,22 @@ def fit_tag_model(
     trn_rows: pd.DataFrame,
     val_rows: pd.DataFrame,
     all_cands_for_maps: pd.DataFrame,
-) -> tuple[lgb.LGBMClassifier, LabelEncoder, dict[str, Any], np.ndarray, np.ndarray, dict[str, float]]:
+) -> tuple[
+    lgb.LGBMClassifier,
+    LabelEncoder,
+    dict[str, Any],
+    np.ndarray,
+    np.ndarray,
+    dict[str, float],
+]:
     category_maps = build_category_maps(trn_rows, all_cands_for_maps)
     token_vocab = build_token_vocab(trn_rows)
     site_freq = trn_rows["site_key"].value_counts(normalize=True).to_dict()
     top_candidate_tags = [
         tag
-        for tag, _ in Counter(all_cands_for_maps["candidate_tag"].fillna("").astype(str)).most_common(TOP_TAG_FEATURES)
+        for tag, _ in Counter(
+            all_cands_for_maps["candidate_tag"].fillna("").astype(str)
+        ).most_common(TOP_TAG_FEATURES)
         if tag
     ]
 
@@ -405,14 +474,23 @@ def fit_tag_model(
     y_trn = label_encoder.fit_transform(trn_rows["target_tag"].fillna("").astype(str))
     class_to_idx = {label: idx for idx, label in enumerate(label_encoder.classes_)}
     y_val = np.array(
-        [class_to_idx.get(label, -1) for label in val_rows["target_tag"].fillna("").astype(str)],
+        [
+            class_to_idx.get(label, -1)
+            for label in val_rows["target_tag"].fillna("").astype(str)
+        ],
         dtype=int,
     )
 
-    X_trn = build_tag_features(trn_rows, token_vocab, category_maps, site_freq, top_candidate_tags)
-    X_val = build_tag_features(val_rows, token_vocab, category_maps, site_freq, top_candidate_tags)
+    X_trn = build_tag_features(
+        trn_rows, token_vocab, category_maps, site_freq, top_candidate_tags
+    )
+    X_val = build_tag_features(
+        val_rows, token_vocab, category_maps, site_freq, top_candidate_tags
+    )
 
-    model = lgb.LGBMClassifier(num_class=len(label_encoder.classes_), **TAG_MODEL_PARAMS)
+    model = lgb.LGBMClassifier(
+        num_class=len(label_encoder.classes_), **TAG_MODEL_PARAMS
+    )
     model.fit(X_trn, y_trn)
     val_proba = model.predict_proba(X_val)
     trn_proba = model.predict_proba(X_trn)
@@ -436,12 +514,21 @@ def fit_final_tag_model(
     token_vocab = build_token_vocab(row_df)
     site_freq = row_df["site_key"].value_counts(normalize=True).to_dict()
     top_candidate_tags = [
-        tag for tag, _ in Counter(cand_df["candidate_tag"].fillna("").astype(str)).most_common(TOP_TAG_FEATURES) if tag
+        tag
+        for tag, _ in Counter(
+            cand_df["candidate_tag"].fillna("").astype(str)
+        ).most_common(TOP_TAG_FEATURES)
+        if tag
     ]
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(row_df["target_tag"].fillna("").astype(str))
-    X = build_tag_features(row_df, token_vocab, category_maps, site_freq, top_candidate_tags)
-    model = lgb.LGBMClassifier(num_class=len(label_encoder.classes_), **{**TAG_MODEL_PARAMS, "n_estimators": 500})
+    X = build_tag_features(
+        row_df, token_vocab, category_maps, site_freq, top_candidate_tags
+    )
+    model = lgb.LGBMClassifier(
+        num_class=len(label_encoder.classes_),
+        **{**TAG_MODEL_PARAMS, "n_estimators": 500},
+    )
     model.fit(X, y)
     proba = model.predict_proba(X)
     bundle = {
@@ -475,8 +562,12 @@ def tag_metrics(y_true: np.ndarray, proba: np.ndarray) -> dict[str, float]:
     order = np.argsort(-proba, axis=1)
     return {
         "tag_model_acc": float((pred == y_true).mean()),
-        "tag_model_top3_acc": float(np.mean([y_true[i] in order[i, :3] for i in range(len(y_true))])),
-        "tag_model_top5_acc": float(np.mean([y_true[i] in order[i, :5] for i in range(len(y_true))])),
+        "tag_model_top3_acc": float(
+            np.mean([y_true[i] in order[i, :3] for i in range(len(y_true))])
+        ),
+        "tag_model_top5_acc": float(
+            np.mean([y_true[i] in order[i, :5] for i in range(len(y_true))])
+        ),
     }
 
 
@@ -504,20 +595,38 @@ def compute_priors(row_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def make_tag_proba_by_id(row_df: pd.DataFrame, proba: np.ndarray) -> dict[str, np.ndarray]:
+def make_tag_proba_by_id(
+    row_df: pd.DataFrame, proba: np.ndarray
+) -> dict[str, np.ndarray]:
     return {as_text(row_id): proba[idx] for idx, row_id in enumerate(row_df["id"])}
 
 
-def build_row_context(row_df: pd.DataFrame, label_encoder: LabelEncoder, tag_proba: np.ndarray) -> dict[str, dict[str, Any]]:
+def build_row_context(
+    row_df: pd.DataFrame, label_encoder: LabelEncoder, tag_proba: np.ndarray
+) -> dict[str, dict[str, Any]]:
     proba_by_id = make_tag_proba_by_id(row_df, tag_proba)
     out: dict[str, dict[str, Any]] = {}
     for row in row_df.itertuples(index=False):
         row_id = as_text(getattr(row, "id"))
-        task_tokens = {token.lower() for token in json_loads(getattr(row, "task_tokens_json"), [])}
-        panel_names = {norm_key(value) for value in json_loads(getattr(row, "html_panel_names_json"), [])}
-        panel_labels = {norm_key(value) for value in json_loads(getattr(row, "html_panel_labels_json"), [])}
-        completed = {norm_key(value) for value in json_loads(getattr(row, "html_completed_fields_json"), [])}
-        history_texts = {norm_key(value) for value in json_loads(getattr(row, "history_texts_json"), [])}
+        task_tokens = {
+            token.lower() for token in json_loads(getattr(row, "task_tokens_json"), [])
+        }
+        panel_names = {
+            norm_key(value)
+            for value in json_loads(getattr(row, "html_panel_names_json"), [])
+        }
+        panel_labels = {
+            norm_key(value)
+            for value in json_loads(getattr(row, "html_panel_labels_json"), [])
+        }
+        completed = {
+            norm_key(value)
+            for value in json_loads(getattr(row, "html_completed_fields_json"), [])
+        }
+        history_texts = {
+            norm_key(value)
+            for value in json_loads(getattr(row, "history_texts_json"), [])
+        }
         probs = proba_by_id.get(row_id, np.zeros(len(label_encoder.classes_)))
         order = np.argsort(-probs) if len(probs) else np.array([], dtype=int)
         out[row_id] = {
@@ -534,7 +643,9 @@ def build_row_context(row_df: pd.DataFrame, label_encoder: LabelEncoder, tag_pro
             "tag_order": order,
             "top_tag": label_encoder.classes_[order[0]] if len(order) else "",
             "top_tag_prob": float(probs[order[0]]) if len(order) else 0.0,
-            "tag_margin": float(probs[order[0]] - probs[order[1]]) if len(order) > 1 else 0.0,
+            "tag_margin": (
+                float(probs[order[0]] - probs[order[1]]) if len(order) > 1 else 0.0
+            ),
         }
     return out
 
@@ -565,11 +676,19 @@ def build_rank_features(
         else:
             tag_prob = float(probs[tag_idx])
             where = np.where(order == tag_idx)[0]
-            tag_rank = int(where[0] + 1) if len(where) else len(label_encoder.classes_) + 1
+            tag_rank = (
+                int(where[0] + 1) if len(where) else len(label_encoder.classes_) + 1
+            )
 
         task_tokens = ctx["task_tokens"]
-        text_tokens = {token.lower() for token in json_loads(getattr(cand, "candidate_text_tokens_json"), [])}
-        attrs_tokens = {token.lower() for token in json_loads(getattr(cand, "candidate_attrs_tokens_json"), [])}
+        text_tokens = {
+            token.lower()
+            for token in json_loads(getattr(cand, "candidate_text_tokens_json"), [])
+        }
+        attrs_tokens = {
+            token.lower()
+            for token in json_loads(getattr(cand, "candidate_attrs_tokens_json"), [])
+        }
         field_key = norm_key(getattr(cand, "candidate_field_key"))
         field_tokens = set(tokenize(field_key))
         cand_tokens = text_tokens | attrs_tokens | field_tokens | {candidate_tag}
@@ -585,28 +704,50 @@ def build_rank_features(
 
         site = as_text(getattr(cand, "site_key"))
         global_prior = float(priors["global_prior"].get(candidate_tag, 0.0))
-        site_prior = float(priors["site_prior"].get((site, candidate_tag), global_prior))
+        site_prior = float(
+            priors["site_prior"].get((site, candidate_tag), global_prior)
+        )
 
         features = {
             "candidate_idx": int(getattr(cand, "candidate_idx")),
-            "candidate_tag_idx": encode_value(candidate_tag, category_maps["candidate_tag"]),
-            "candidate_role_idx": encode_value(getattr(cand, "candidate_role"), category_maps["candidate_role"]),
-            "candidate_type_idx": encode_value(getattr(cand, "candidate_type"), category_maps["candidate_type"]),
+            "candidate_tag_idx": encode_value(
+                candidate_tag, category_maps["candidate_tag"]
+            ),
+            "candidate_role_idx": encode_value(
+                getattr(cand, "candidate_role"), category_maps["candidate_role"]
+            ),
+            "candidate_type_idx": encode_value(
+                getattr(cand, "candidate_type"), category_maps["candidate_type"]
+            ),
             "candidate_op_idx": encode_value(
-                getattr(cand, "candidate_predicted_op"), category_maps["candidate_predicted_op"]
+                getattr(cand, "candidate_predicted_op"),
+                category_maps["candidate_predicted_op"],
             ),
             "site_idx": encode_value(site, category_maps["site_key"]),
             "site_freq": float(site_freq.get(site, 0.0)),
-            "html_type_idx": encode_value(getattr(cand, "html_type"), category_maps["html_type"]),
+            "html_type_idx": encode_value(
+                getattr(cand, "html_type"), category_maps["html_type"]
+            ),
             "is_workflow": int(getattr(cand, "is_workflow")),
-            "history_last_op_idx": encode_value(getattr(cand, "history_last_op"), category_maps["history_last_op"]),
+            "history_last_op_idx": encode_value(
+                getattr(cand, "history_last_op"), category_maps["history_last_op"]
+            ),
             "history_step_count": int(getattr(cand, "history_step_count")),
             "html_current_step": int(getattr(cand, "html_current_step")),
             "html_total_steps": int(getattr(cand, "html_total_steps")),
-            "html_progress": safe_ratio(int(getattr(cand, "html_current_step")), int(getattr(cand, "html_total_steps"))),
-            "candidate_tag_count_in_row": int(getattr(cand, "candidate_tag_count_in_row")),
-            "candidate_tag_frac_in_row": float(getattr(cand, "candidate_tag_frac_in_row")),
-            "candidate_tag_is_unique": int(int(getattr(cand, "candidate_tag_count_in_row")) == 1),
+            "html_progress": safe_ratio(
+                int(getattr(cand, "html_current_step")),
+                int(getattr(cand, "html_total_steps")),
+            ),
+            "candidate_tag_count_in_row": int(
+                getattr(cand, "candidate_tag_count_in_row")
+            ),
+            "candidate_tag_frac_in_row": float(
+                getattr(cand, "candidate_tag_frac_in_row")
+            ),
+            "candidate_tag_is_unique": int(
+                int(getattr(cand, "candidate_tag_count_in_row")) == 1
+            ),
             "candidate_text_empty": int(getattr(cand, "candidate_text_empty")),
             "candidate_attrs_empty": int(getattr(cand, "candidate_attrs_empty")),
             "candidate_options_count": int(getattr(cand, "candidate_options_count")),
@@ -624,11 +765,17 @@ def build_rank_features(
             "field_key_in_task": int(bool(field_key and field_key in ctx["task_norm"])),
             "name_in_task": int(bool(name_key and name_key in ctx["task_norm"])),
             "label_in_task": int(bool(label_key and label_key in ctx["task_norm"])),
-            "placeholder_in_task": int(bool(placeholder_key and placeholder_key in ctx["task_norm"])),
-            "history_last_field_match": int(bool(field_key and field_key == ctx["history_last_text_key"])),
+            "placeholder_in_task": int(
+                bool(placeholder_key and placeholder_key in ctx["task_norm"])
+            ),
+            "history_last_field_match": int(
+                bool(field_key and field_key == ctx["history_last_text_key"])
+            ),
             "in_history_texts": int(bool(keys & ctx["history_texts"])),
             "in_html_completed": int(bool(keys & ctx["completed"])),
-            "in_workflow_panel": int(bool(keys & (ctx["panel_names"] | ctx["panel_labels"]))),
+            "in_workflow_panel": int(
+                bool(keys & (ctx["panel_names"] | ctx["panel_labels"]))
+            ),
             "tag_prob_for_candidate": tag_prob,
             "tag_rank_for_candidate": tag_rank,
             "tag_is_top1": int(candidate_tag == ctx["top_tag"]),
@@ -639,7 +786,9 @@ def build_rank_features(
             "site_tag_prior": site_prior,
             "click_tag_hint": int(candidate_tag in CLICK_TAGS),
             "input_click_type_hint": int(
-                candidate_tag == "input" and as_text(getattr(cand, "candidate_type")).lower() in CLICK_INPUT_TYPES
+                candidate_tag == "input"
+                and as_text(getattr(cand, "candidate_type")).lower()
+                in CLICK_INPUT_TYPES
             ),
         }
         feature_rows.append(features)
@@ -690,7 +839,9 @@ def fit_ranker(
         "X": X_trn,
         "y": y_trn,
         "group": g_trn,
-        "categorical_feature": [col for col in CATEGORICAL_FEATURES if col in X_trn.columns],
+        "categorical_feature": [
+            col for col in CATEGORICAL_FEATURES if col in X_trn.columns
+        ],
     }
     callbacks = []
     if X_val is not None and y_val is not None and g_val is not None:
@@ -715,7 +866,11 @@ def parse_options_json(value: Any) -> list[str]:
 
 
 def predict_op(cand: pd.Series | dict[str, Any]) -> str:
-    getter = cand.get if isinstance(cand, dict) else lambda key, default="": getattr(cand, key, default)
+    getter = (
+        cand.get
+        if isinstance(cand, dict)
+        else lambda key, default="": getattr(cand, key, default)
+    )
     tag = as_text(getter("candidate_tag", "")).lower()
     input_type = as_text(getter("candidate_type", "")).lower()
     predicted = as_text(getter("candidate_predicted_op", "")).upper()
@@ -781,11 +936,16 @@ def extract_type_value(task: str, cand: dict[str, Any]) -> str:
         match = EMAIL_RE.search(task)
         if match:
             return match.group(0)
-    if any(key in field_blob for key in ["id", "code", "serial", "asset", "mission", "confirmation"]):
+    if any(
+        key in field_blob
+        for key in ["id", "code", "serial", "asset", "mission", "confirmation"]
+    ):
         match = CODE_RE.search(task)
         if match:
             return match.group(0)
-    if any(key in field_blob for key in ["amount", "price", "quantity", "number", "limit"]):
+    if any(
+        key in field_blob for key in ["amount", "price", "quantity", "number", "limit"]
+    ):
         money = MONEY_RE.search(task)
         if money:
             return money.group(1)
@@ -824,13 +984,19 @@ def fallback_non_click_value(task: str, cand: dict[str, Any], op: str) -> str:
     if money:
         return money.group(1)
 
-    if any(key in field_blob for key in ["amount", "count", "limit", "number", "price", "quantity"]):
+    if any(
+        key in field_blob
+        for key in ["amount", "count", "limit", "number", "price", "quantity"]
+    ):
         match = DECIMAL_RE.search(task)
         if match:
             return match.group(0)
         return "1"
 
-    if any(key in field_blob for key in ["caller", "manager", "name", "owner", "pilot", "reviewer"]):
+    if any(
+        key in field_blob
+        for key in ["caller", "manager", "name", "owner", "pilot", "reviewer"]
+    ):
         person = re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", task)
         if person:
             return person.group(0)
@@ -844,7 +1010,11 @@ def fallback_non_click_value(task: str, cand: dict[str, Any], op: str) -> str:
             continue
         return text
 
-    task_tokens = [token for token in TOKEN_RE.findall(task) if token.lower() not in {"task", "click", "type", "select"}]
+    task_tokens = [
+        token
+        for token in TOKEN_RE.findall(task)
+        if token.lower() not in {"task", "click", "type", "select"}
+    ]
     if task_tokens:
         return task_tokens[-1]
     return f"UNKNOWN_{op}_VALUE"
@@ -854,9 +1024,13 @@ def predict_value(task: str, cand: dict[str, Any], op: str) -> str:
     if op == "CLICK":
         return ""
     if op == "SELECT":
-        return extract_select_value(task, cand) or fallback_non_click_value(task, cand, op)
+        return extract_select_value(task, cand) or fallback_non_click_value(
+            task, cand, op
+        )
     if op == "TYPE":
-        return extract_type_value(task, cand) or fallback_non_click_value(task, cand, op)
+        return extract_type_value(task, cand) or fallback_non_click_value(
+            task, cand, op
+        )
     return ""
 
 
@@ -891,7 +1065,9 @@ def predict_from_scores(
         true_target = as_text(row.get("target_id"))
         true_pos = -1
         if true_target:
-            matches = np.where(group["candidate_id"].astype(str).to_numpy() == true_target)[0]
+            matches = np.where(
+                group["candidate_id"].astype(str).to_numpy() == true_target
+            )[0]
             true_pos = int(matches[0]) if len(matches) else -1
         order = np.argsort(-group_scores)
         true_rank = int(np.where(order == true_pos)[0][0]) + 1 if true_pos >= 0 else 999
@@ -919,7 +1095,9 @@ def evaluate_predictions(pred: pd.DataFrame) -> dict[str, float]:
     pred = pred.copy()
     pred["target_match"] = pred["target_id"] == pred["true_target_id"]
     pred["op_match"] = pred["op"] == pred["true_op"]
-    pred["value_match"] = pred["value"].map(normalize_value) == pred["true_value"].map(normalize_value)
+    pred["value_match"] = pred["value"].map(normalize_value) == pred["true_value"].map(
+        normalize_value
+    )
     pred["all_match"] = pred["target_match"] & pred["op_match"] & pred["value_match"]
     metrics = {
         "target_id_acc": float(pred["target_match"].mean()),
@@ -937,14 +1115,18 @@ def evaluate_predictions(pred: pd.DataFrame) -> dict[str, float]:
     return metrics
 
 
-def enforce_non_click_values(pred: pd.DataFrame, row_df: pd.DataFrame, cand_df: pd.DataFrame) -> pd.DataFrame:
+def enforce_non_click_values(
+    pred: pd.DataFrame, row_df: pd.DataFrame, cand_df: pd.DataFrame
+) -> pd.DataFrame:
     pred = pred.copy()
     row_by_id = row_df.set_index("id").to_dict("index")
     cand_by_key = {
         (as_text(row.id), as_text(row.candidate_id)): row._asdict()
         for row in cand_df.itertuples(index=False)
     }
-    blank_mask = pred["op"].isin(["TYPE", "SELECT"]) & pred["value"].fillna("").astype(str).str.strip().eq("")
+    blank_mask = pred["op"].isin(["TYPE", "SELECT"]) & pred["value"].fillna("").astype(
+        str
+    ).str.strip().eq("")
     for idx, row in pred.loc[blank_mask].iterrows():
         op = as_text(row["op"])
         row_id = as_text(row["id"])
@@ -954,26 +1136,42 @@ def enforce_non_click_values(pred: pd.DataFrame, row_df: pd.DataFrame, cand_df: 
         cand = cand_by_key.get((row_id, target_id), {})
         value = predict_value(task, cand, op) if cand else ""
         if not normalize_value(value):
-            value = fallback_non_click_value(task, cand, op) if cand else f"UNKNOWN_{op}_VALUE"
+            value = (
+                fallback_non_click_value(task, cand, op)
+                if cand
+                else f"UNKNOWN_{op}_VALUE"
+            )
         if not normalize_value(value):
             value = f"UNKNOWN_{op}_VALUE"
         pred.at[idx, "value"] = value
     return pred
 
 
-def save_submission(pred: pd.DataFrame, row_df: pd.DataFrame, out_path: Path) -> pd.DataFrame:
-    sub = row_df[["id"]].merge(pred[["id", "op", "target_id", "value"]], on="id", how="left")
+def save_submission(
+    pred: pd.DataFrame, row_df: pd.DataFrame, out_path: Path
+) -> pd.DataFrame:
+    sub = row_df[["id"]].merge(
+        pred[["id", "op", "target_id", "value"]], on="id", how="left"
+    )
     sub["op"] = sub["op"].fillna("CLICK")
     sub["target_id"] = sub["target_id"].fillna("")
     sub["value"] = sub["value"].fillna("")
     sub.loc[sub["op"] == "CLICK", "value"] = ""
-    non_click_blank = sub["op"].isin(["TYPE", "SELECT"]) & sub["value"].astype(str).str.strip().eq("")
-    sub.loc[non_click_blank, "value"] = sub.loc[non_click_blank, "op"].map(lambda op: f"UNKNOWN_{op}_VALUE")
-    sub[["id", "op", "target_id", "value"]].to_csv(out_path, index=False, encoding="utf-8", lineterminator="\n")
+    non_click_blank = sub["op"].isin(["TYPE", "SELECT"]) & sub["value"].astype(
+        str
+    ).str.strip().eq("")
+    sub.loc[non_click_blank, "value"] = sub.loc[non_click_blank, "op"].map(
+        lambda op: f"UNKNOWN_{op}_VALUE"
+    )
+    sub[["id", "op", "target_id", "value"]].to_csv(
+        out_path, index=False, encoding="utf-8", lineterminator="\n"
+    )
     return sub[["id", "op", "target_id", "value"]]
 
 
-def save_workflow_only_submission(submission: pd.DataFrame, row_df: pd.DataFrame, out_path: Path) -> pd.DataFrame:
+def save_workflow_only_submission(
+    submission: pd.DataFrame, row_df: pd.DataFrame, out_path: Path
+) -> pd.DataFrame:
     html_type = row_df[["id", "html_type"]]
     out = submission.merge(html_type, on="id", how="left")
     raw_mask = out["html_type"] != "workflow"
@@ -985,15 +1183,21 @@ def save_workflow_only_submission(submission: pd.DataFrame, row_df: pd.DataFrame
     return out
 
 
-def feature_importance(models: list[lgb.LGBMRanker], feature_names: list[str]) -> pd.DataFrame:
+def feature_importance(
+    models: list[lgb.LGBMRanker], feature_names: list[str]
+) -> pd.DataFrame:
     parts = []
     for idx, model in enumerate(models):
         parts.append(
             pd.DataFrame(
                 {
                     "feature": feature_names,
-                    f"model_{idx}_gain": model.booster_.feature_importance(importance_type="gain"),
-                    f"model_{idx}_split": model.booster_.feature_importance(importance_type="split"),
+                    f"model_{idx}_gain": model.booster_.feature_importance(
+                        importance_type="gain"
+                    ),
+                    f"model_{idx}_split": model.booster_.feature_importance(
+                        importance_type="split"
+                    ),
                 }
             )
         )
@@ -1022,8 +1226,8 @@ def run_training(args: argparse.Namespace) -> None:
     print("train candidates:", len(trn_cands), "valid candidates:", len(val_cands))
 
     print("[fit] tag model")
-    tag_model, tag_encoder, tag_bundle, trn_tag_proba, val_tag_proba, tag_metric = fit_tag_model(
-        trn_rows, val_rows, trn_cands
+    tag_model, tag_encoder, tag_bundle, trn_tag_proba, val_tag_proba, tag_metric = (
+        fit_tag_model(trn_rows, val_rows, trn_cands)
     )
     print("tag metrics:", tag_metric)
 
@@ -1031,8 +1235,24 @@ def run_training(args: argparse.Namespace) -> None:
     rank_category_maps = build_category_maps(trn_rows, trn_cands)
     site_freq = trn_rows["site_key"].value_counts(normalize=True).to_dict()
     priors = compute_priors(trn_rows)
-    X_trn = build_rank_features(trn_cands, trn_rows, tag_encoder, trn_tag_proba, rank_category_maps, site_freq, priors)
-    X_val = build_rank_features(val_cands, val_rows, tag_encoder, val_tag_proba, rank_category_maps, site_freq, priors)
+    X_trn = build_rank_features(
+        trn_cands,
+        trn_rows,
+        tag_encoder,
+        trn_tag_proba,
+        rank_category_maps,
+        site_freq,
+        priors,
+    )
+    X_val = build_rank_features(
+        val_cands,
+        val_rows,
+        tag_encoder,
+        val_tag_proba,
+        rank_category_maps,
+        site_freq,
+        priors,
+    )
     y_trn = trn_cands["label_is_target"].astype(int).to_numpy()
     y_val = val_cands["label_is_target"].astype(int).to_numpy()
     g_trn = group_sizes(trn_cands)
@@ -1045,7 +1265,16 @@ def run_training(args: argparse.Namespace) -> None:
     model_summaries = []
     for config in RANKER_CONFIGS:
         print(" -", config["name"])
-        ranker = fit_ranker(X_trn, y_trn, g_trn, X_val, y_val, g_val, config=config, n_estimators=args.n_estimators)
+        ranker = fit_ranker(
+            X_trn,
+            y_trn,
+            g_trn,
+            X_val,
+            y_val,
+            g_val,
+            config=config,
+            n_estimators=args.n_estimators,
+        )
         scores = ranker.predict(X_val, num_iteration=ranker.best_iteration_)
         pred_single = predict_from_scores(val_cands, val_rows, scores, g_val)
         single_metrics = evaluate_predictions(pred_single)
@@ -1071,13 +1300,21 @@ def run_training(args: argparse.Namespace) -> None:
     for key, value in metrics.items():
         print(f"{key}: {value:.6f}" if isinstance(value, float) else f"{key}: {value}")
 
-    pred_val.to_csv(OUTPUT_DIR / "validation_predictions.csv", index=False, encoding="utf-8", lineterminator="\n")
+    pred_val.to_csv(
+        OUTPUT_DIR / "validation_predictions.csv",
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
+    )
     with open(OUTPUT_DIR / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
     with open(SCRIPT_DIR / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
     feature_importance(rankers, list(X_trn.columns)).to_csv(
-        OUTPUT_DIR / "feature_importance_ranker.csv", index=False, encoding="utf-8", lineterminator="\n"
+        OUTPUT_DIR / "feature_importance_ranker.csv",
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
     )
 
     tag_importance = pd.DataFrame(
@@ -1087,10 +1324,17 @@ def run_training(args: argparse.Namespace) -> None:
             "split": tag_model.booster_.feature_importance(importance_type="split"),
         }
     ).sort_values("gain", ascending=False)
-    tag_importance.to_csv(OUTPUT_DIR / "feature_importance_tag.csv", index=False, encoding="utf-8", lineterminator="\n")
+    tag_importance.to_csv(
+        OUTPUT_DIR / "feature_importance_tag.csv",
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
+    )
 
     print("[refit] full train")
-    final_tag_model, final_tag_encoder, final_tag_bundle, full_tag_proba = fit_final_tag_model(row_df, cand_df)
+    final_tag_model, final_tag_encoder, final_tag_bundle, full_tag_proba = (
+        fit_final_tag_model(row_df, cand_df)
+    )
     final_rank_category_maps = build_category_maps(row_df, cand_df)
     final_site_freq = row_df["site_key"].value_counts(normalize=True).to_dict()
     final_priors = compute_priors(row_df)
@@ -1112,7 +1356,9 @@ def run_training(args: argparse.Namespace) -> None:
         final_iters = int(max(250, (holdout_ranker.best_iteration_ or 500) * 1.15))
         final_iterations.append(final_iters)
         print(f" - {config['name']} final_iters={final_iters}")
-        final_rankers.append(fit_ranker(X_all, y_all, g_all, config=config, n_estimators=final_iters))
+        final_rankers.append(
+            fit_ranker(X_all, y_all, g_all, config=config, n_estimators=final_iters)
+        )
 
     bundle = {
         "tag_model": final_tag_model,
@@ -1129,13 +1375,22 @@ def run_training(args: argparse.Namespace) -> None:
         "final_iterations": final_iterations,
     }
     joblib.dump(bundle, OUTPUT_DIR / "lgbm_ranker_v6_bundle.joblib")
-    joblib.dump({"model": final_tag_model, "encoder": final_tag_encoder, "bundle": final_tag_bundle}, OUTPUT_DIR / "tag_model.joblib")
+    joblib.dump(
+        {
+            "model": final_tag_model,
+            "encoder": final_tag_encoder,
+            "bundle": final_tag_bundle,
+        },
+        OUTPUT_DIR / "tag_model.joblib",
+    )
 
     print("[predict] test")
     test_rows, test_cands, source_path = load_or_build_test_data()
     if source_path:
         print("test source:", source_path)
-    test_tag_proba = predict_tag_proba(final_tag_model, final_tag_encoder, final_tag_bundle, test_rows)
+    test_tag_proba = predict_tag_proba(
+        final_tag_model, final_tag_encoder, final_tag_bundle, test_rows
+    )
     X_test = build_rank_features(
         test_cands,
         test_rows,
@@ -1149,10 +1404,22 @@ def run_training(args: argparse.Namespace) -> None:
     test_scores = np.mean([model.predict(X_test) for model in final_rankers], axis=0)
     pred_test = predict_from_scores(test_cands, test_rows, test_scores, g_test)
     pred_test = enforce_non_click_values(pred_test, test_rows, test_cands)
-    pred_test.to_csv(OUTPUT_DIR / "test_predictions.csv", index=False, encoding="utf-8", lineterminator="\n")
+    pred_test.to_csv(
+        OUTPUT_DIR / "test_predictions.csv",
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
+    )
     submission = save_submission(pred_test, test_rows, SUBMISSION_PATH)
-    submission.to_csv(OUTPUT_DIR / "submission.csv", index=False, encoding="utf-8", lineterminator="\n")
-    workflow_only = save_workflow_only_submission(submission, test_rows, WORKFLOW_ONLY_SUBMISSION_PATH)
+    submission.to_csv(
+        OUTPUT_DIR / "submission.csv",
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
+    )
+    workflow_only = save_workflow_only_submission(
+        submission, test_rows, WORKFLOW_ONLY_SUBMISSION_PATH
+    )
     workflow_only.to_csv(
         OUTPUT_DIR / "submission_workflow_only_rawweb_garbage.csv",
         index=False,
@@ -1160,12 +1427,16 @@ def run_training(args: argparse.Namespace) -> None:
         lineterminator="\n",
     )
     print("submission rows:", len(submission))
-    print("workflow-only garbage rows:", int((test_rows["html_type"] != "workflow").sum()))
+    print(
+        "workflow-only garbage rows:", int((test_rows["html_type"] != "workflow").sum())
+    )
     print("saved:", SCRIPT_DIR)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="v6 tag-assisted LightGBM ranker training.")
+    parser = argparse.ArgumentParser(
+        description="v6 tag-assisted LightGBM ranker training."
+    )
     parser.add_argument("--n-estimators", type=int, default=1800)
     args = parser.parse_args()
     run_training(args)
