@@ -1,0 +1,18 @@
+{
+  "tag_model_acc": 0.839041095890411,
+  "tag_model_top3_acc": 0.9735812133072407,
+  "tag_model_top5_acc": 0.9926614481409002,
+  "target_id_acc": 0.7318982387475538,
+  "target_top3_acc": 0.8605675146771037,
+  "target_top5_acc": 0.9080234833659491,
+  "op_acc": 0.9456947162426614,
+  "value_acc": 0.7617416829745597,
+  "all_match_acc": 0.5430528375733855,
+  "workflow_target_id_acc": 0.9900695134061569,
+  "workflow_all_match_acc": 0.7666335650446872,
+  "raw_web_target_id_acc": 0.4811957569913211,
+  "raw_web_all_match_acc": 0.32594021215043395,
+  "ensemble_size": 2,
+  "rank_features": 49,
+  "tag_best_iteration": 0
+}
