@@ -53,4 +53,23 @@ target_id는 반드시 candidate_elemenets안에 존재하고, 한 row안에서 
 
 
 v5는 v4모델에서 LGBM_ranker가 아닌 학습 중심의 모델을 사용하려고 했으나...여러가지 오류가 생겨 막히는중
+ㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡㅡ
+훈련 계획
+site_token: 앞의 site_를 빼고 뒤에 숫자만 추출
+task: 앞의 Task: 빼고 토큰화. 대소문자 합치지 말고 숫자도 지우지 않음. 불용어만 제거하자.
+history: target_id 예측에 매우 중요. workflow인지 raw web인지 구분하여 전략 따로 수립?
+        Sequence 자체를 학습시켜야한다. 
+cleaned_html: workflow인지 raw web인지 구분할 때 사용. 이를 구분할 새로운 칼럼을 하나 만든다?
+                site_token을 알면 html 종류를 알 수 있다. 규칙으로 사용하자.
+candiate_elements: 15개의 후보들 중에서 가장 확률이 높은 것을 최종 정답으로 사용.
+                    원핫 인코딩을 통해 확률 구현?
+
+target_id: candidate_elements의 15개 row중 가장 확률이 높은 target을 최종 선택.
+            tag, attrs, text가 모두 비어있는 경우는 없고, tag는 비어있지 않음.
+            -> id를 예측하는 문제가 아니라, tag를 예측하는 문제로 바꾸고, candidate_elements중에서 해당 tag를 가진 id를 선별?
+            
+
+op
+
+value
 
