@@ -92,7 +92,7 @@ RANKER_CONFIGS = [
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[A-Za-z0-9/._:+,-]*[A-Za-z0-9])?")
 ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
-CODE_RE = re.compile(r"\b[A-Z]{2,6}-[A-Z0-9]{2,20}\b", re.I)
+CODE_RE = re.compile(r"\b[A-Z]{1,6}-(?=[A-Z0-9]*\d)[A-Z0-9]{2,20}\b", re.I)
 MONEY_RE = re.compile(r"[$€£]\s*(\d+(?:\.\d+)?)")
 DECIMAL_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
 
@@ -905,17 +905,104 @@ def extract_select_value(task: str, cand: dict[str, Any]) -> str:
 
 
 def extract_after_field(task: str, field: str) -> str:
-    field_norm = norm_key(field)
+    field_text = as_text(field).strip()
+    field_norm = norm_key(field_text)
     if not field_norm:
         return ""
+    task_text = re.sub(r"^\s*Task\s*:\s*", "", as_text(task), flags=re.I).strip()
+    alias_pattern = re.escape(field_norm).replace(r"\ ", r"\s+")
     pattern = re.compile(
-        rf"\b{re.escape(field_norm).replace('\\ ', r'\\s+')}\s+([^,.;]+?)(?=\s+(?:and|with|set|mark|queue|submit|click|open)\b|[,.;]|$)",
+        rf"\b{alias_pattern}\b\s*(?:is|as|to|for|with|=|:)?\s+(.+?)(?=,|;|\.(?:\s|$)|\s+\b(?:and|then|set|choose|select|mark|state|route|store|notify|queue|submit|click|open|schedule|due date|priority|mode|about)\b|$)",
         re.I,
     )
-    match = pattern.search(norm_key(task))
+    match = pattern.search(task_text)
     if not match:
         return ""
-    return match.group(1).strip()
+    return cleanup_extracted_value(match.group(1))
+
+
+def cleanup_extracted_value(value: Any) -> str:
+    text = as_text(value).strip()
+    text = re.sub(r"^\s*(?:is|as|to|for|with|=|:)\s+", "", text, flags=re.I)
+    text = re.split(
+        r"\s+\b(?:and|then|set|choose|select|mark|state|route|store|notify|queue|submit|click|open|schedule|due date|priority|mode|about)\b",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    return text.strip(" \t\r\n\"'.,;:")
+
+
+def decimal_to_compact(value: str) -> str:
+    if not re.fullmatch(r"\d+\.\d+", value):
+        return value
+    return value.rstrip("0").rstrip(".")
+
+
+def field_aliases(cand: dict[str, Any]) -> list[str]:
+    values = [
+        cand.get("candidate_label", ""),
+        cand.get("candidate_name", ""),
+        cand.get("candidate_field_key", ""),
+        cand.get("candidate_text", ""),
+    ]
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        raw = cleanup_extracted_value(value)
+        for alias in [raw, norm_key(raw)]:
+            alias = alias.strip()
+            key = alias.lower()
+            if alias and key not in seen and key not in {"name", "text", "search"}:
+                seen.add(key)
+                aliases.append(alias)
+    return aliases
+
+
+def person_like_from_task(task: str, field_blob: str) -> str:
+    field_tokens = set(field_blob.split())
+    person_tokens = {
+        "advisor",
+        "borrower",
+        "caller",
+        "counsel",
+        "donor",
+        "employee",
+        "inspector",
+        "manager",
+        "operator",
+        "owner",
+        "patron",
+        "pilot",
+        "producer",
+        "recipient",
+        "reviewer",
+        "student",
+        "technician",
+    }
+    if not field_tokens & person_tokens:
+        return ""
+    task_text = re.sub(r"^\s*Task\s*:\s*", "", as_text(task), flags=re.I).strip()
+    triggers: list[str] = []
+    if "advisor" in field_tokens:
+        triggers += [r"choose\s+advisor", r"advisor"]
+    if "student" in field_tokens:
+        triggers += [r"add\s+student", r"student"]
+    if "donor" in field_tokens:
+        triggers += [r"for\s+donor", r"donor"]
+    if "patron" in field_tokens:
+        triggers += [r"for\s+patron", r"patron"]
+    if "employee" in field_tokens or "recipient" in field_tokens:
+        triggers += [r"for"]
+    for role in ["borrower", "caller", "counsel", "inspector", "manager", "operator", "owner", "pilot", "producer", "reviewer", "technician"]:
+        if role in field_tokens:
+            triggers += [rf"assign(?:ed)?\s+{role}", rf"{role}"]
+    name_pat = r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})"
+    for trigger in triggers:
+        match = re.search(rf"(?i:\b{trigger}\s+){name_pat}\b", task_text)
+        if match:
+            return cleanup_extracted_value(match.group(1))
+    return ""
 
 
 def extract_type_value(task: str, cand: dict[str, Any]) -> str:
@@ -928,10 +1015,10 @@ def extract_type_value(task: str, cand: dict[str, Any]) -> str:
     ]
     field_blob = " ".join(norm_key(value) for value in field_values)
 
-    if "date" in field_blob:
-        match = ISO_DATE_RE.search(task)
-        if match:
-            return match.group(0)
+    person_value = person_like_from_task(task, field_blob)
+    if person_value:
+        return person_value
+
     if "email" in field_blob:
         match = EMAIL_RE.search(task)
         if match:
@@ -948,12 +1035,16 @@ def extract_type_value(task: str, cand: dict[str, Any]) -> str:
     ):
         money = MONEY_RE.search(task)
         if money:
-            return money.group(1)
+            return decimal_to_compact(money.group(1))
         match = DECIMAL_RE.search(task)
+        if match:
+            return decimal_to_compact(match.group(0))
+    if "date" in field_blob:
+        match = ISO_DATE_RE.search(task)
         if match:
             return match.group(0)
 
-    for field in field_values:
+    for field in field_aliases(cand):
         value = extract_after_field(task, field)
         if value:
             return value
@@ -982,7 +1073,7 @@ def fallback_non_click_value(task: str, cand: dict[str, Any], op: str) -> str:
 
     money = MONEY_RE.search(task)
     if money:
-        return money.group(1)
+        return decimal_to_compact(money.group(1))
 
     if any(
         key in field_blob
@@ -990,16 +1081,12 @@ def fallback_non_click_value(task: str, cand: dict[str, Any], op: str) -> str:
     ):
         match = DECIMAL_RE.search(task)
         if match:
-            return match.group(0)
+            return decimal_to_compact(match.group(0))
         return "1"
 
-    if any(
-        key in field_blob
-        for key in ["caller", "manager", "name", "owner", "pilot", "reviewer"]
-    ):
-        person = re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", task)
-        if person:
-            return person.group(0)
+    person_value = person_like_from_task(task, field_blob)
+    if person_value:
+        return person_value
 
     for value in field_values:
         text = normalize_value(value)
