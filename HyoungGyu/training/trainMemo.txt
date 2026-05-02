@@ -73,3 +73,10 @@ op
 
 value
 
+
+ - raw task 원문 casing 보존
+  - then, choose, set, due date, about 등 다음 구문 절단
+  - cold-chain 같은 일반 hyphen 단어를 code로 잘못 잡지 않도록 CODE_RE 수정
+  - decimal trailing zero 정리: 852.60 -> 852.6
+  - person/name 계열 추출 개선
+  - TYPE/SELECT인데 value 빈 값이면 최종 후처리로 다시 채움
