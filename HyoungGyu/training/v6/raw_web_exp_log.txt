@@ -1,0 +1,76 @@
+C:\Users\gyu61\anaconda3\Lib\site-packages\joblib\externals\loky\backend\context.py:136: UserWarning: Could not find the number of physical cores for the following reason:
+[WinError 2] 지정된 파일을 찾을 수 없습니다
+Returning the number of logical cores instead. You can silence this warning by setting LOKY_MAX_CPU_COUNT to the number of cores you want to use.
+  warnings.warn(
+  File "C:\Users\gyu61\anaconda3\Lib\site-packages\joblib\externals\loky\backend\context.py", line 257, in _count_physical_cores
+    cpu_info = subprocess.run(
+        "wmic CPU Get NumberOfCores /Format:csv".split(),
+        capture_output=True,
+        text=True,
+    )
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 554, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 1039, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 1554, in _execute_child
+    hp, ht, pid, tid = _winapi.CreateProcess(executable, args,
+                       ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+                             # no special security
+                             ^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+                             cwd,
+                             ^^^^
+                             startupinfo)
+                             ^^^^^^^^^^^^
+dropped malformed train rows: 4
+dropped train-only sites: ['site_2aa627db'] rows=87
+[mixed split]
+  train rows: 8172  val rows: 2044
+[raw_web only]
+  train rows: 4024  val rows: 1037
+  train cands: 60360  val cands: 15555
+
+[fit] tag model on raw_web only
+  tag metrics: {'tag_model_acc': 0.6711668273866924, 'tag_model_top3_acc': 0.9469623915139826, 'tag_model_top5_acc': 0.9816779170684667}
+
+[features] ranker on raw_web only
+
+[fit] ranker ensemble on raw_web only
+ - ranker_seed42
+Training until validation scores don't improve for 100 rounds
+[100]	valid_0's ndcg@1: 0.467695	valid_0's ndcg@3: 0.603822	valid_0's ndcg@5: 0.647977
+[200]	valid_0's ndcg@1: 0.470588	valid_0's ndcg@3: 0.604132	valid_0's ndcg@5: 0.647668
+Early stopping, best iteration is:
+[118]	valid_0's ndcg@1: 0.481196	valid_0's ndcg@3: 0.607668	valid_0's ndcg@5: 0.651993
+ - ranker_seed77
+Training until validation scores don't improve for 100 rounds
+[100]	valid_0's ndcg@1: 0.479267	valid_0's ndcg@3: 0.601951	valid_0's ndcg@5: 0.652955
+Early stopping, best iteration is:
+[72]	valid_0's ndcg@1: 0.484089	valid_0's ndcg@3: 0.608804	valid_0's ndcg@5: 0.655656
+
+[raw_web-only model on raw_web val]
+  target_id_acc: 0.4764
+  target_top3_acc: 0.6943
+  target_top5_acc: 0.8139
+  op_acc: 0.8852
+  value_acc: 0.7541
+  all_match_acc: 0.3288
+  raw_web_target_id_acc: 0.4764
+  raw_web_all_match_acc: 0.3288
+
+[비교] mixed 모델의 raw_web val 성능 (이전 기록):
+  raw_web_target_id_acc: 0.4889
+  raw_web_all_match_acc: 0.3337
+
+[Δ] raw_web 전용 - mixed:
+  target_id_acc: -0.0125
+  all_match_acc: -0.0049

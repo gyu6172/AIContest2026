@@ -80,3 +80,7 @@ value
   - decimal trailing zero 정리: 852.60 -> 852.6
   - person/name 계열 추출 개선
   - TYPE/SELECT인데 value 빈 값이면 최종 후처리로 다시 채움
+
+
+  site_token이 같으면 같은 사이트 계열임.
+  site_token별로 무슨 사이트인지 토큰화가능하지 않을까? 

@@ -1,0 +1,90 @@
+C:\Users\gyu61\anaconda3\Lib\site-packages\joblib\externals\loky\backend\context.py:136: UserWarning: Could not find the number of physical cores for the following reason:
+[WinError 2] 지정된 파일을 찾을 수 없습니다
+Returning the number of logical cores instead. You can silence this warning by setting LOKY_MAX_CPU_COUNT to the number of cores you want to use.
+  warnings.warn(
+  File "C:\Users\gyu61\anaconda3\Lib\site-packages\joblib\externals\loky\backend\context.py", line 257, in _count_physical_cores
+    cpu_info = subprocess.run(
+        "wmic CPU Get NumberOfCores /Format:csv".split(),
+        capture_output=True,
+        text=True,
+    )
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 554, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 1039, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gyu61\anaconda3\Lib\subprocess.py", line 1554, in _execute_child
+    hp, ht, pid, tid = _winapi.CreateProcess(executable, args,
+                       ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+                             # no special security
+                             ^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+                             cwd,
+                             ^^^^
+                             startupinfo)
+                             ^^^^^^^^^^^^
+TRAIN_ROW_PATH: D:\Dev_Projects\디지털 경진대회 2026\contest_prac\HyoungGyu\preprocessing\preprocessed_train_custom.csv
+TRAIN_CAND_PATH: D:\Dev_Projects\디지털 경진대회 2026\contest_prac\HyoungGyu\preprocessing\preprocessed_train_candidates_custom.csv
+dropped malformed train rows: 4
+dropped train-only sites: ['site_2aa627db'] rows=87
+train rows: 8172 valid rows: 2044
+train candidates: 122580 valid candidates: 30660
+[fit] tag model
+tag metrics: {'tag_model_acc': 0.8385518590998043, 'tag_model_top3_acc': 0.973091976516634, 'tag_model_top5_acc': 0.9931506849315068}
+[features] ranker
+rank features: 59
+[fit] ranker ensemble
+ - ranker_seed42
+Training until validation scores don't improve for 100 rounds
+[100]	valid_0's ndcg@1: 0.733366	valid_0's ndcg@3: 0.804193	valid_0's ndcg@5: 0.827123
+Early stopping, best iteration is:
+[70]	valid_0's ndcg@1: 0.731409	valid_0's ndcg@3: 0.807058	valid_0's ndcg@5: 0.8282
+ - ranker_seed77
+Training until validation scores don't improve for 100 rounds
+[100]	valid_0's ndcg@1: 0.730431	valid_0's ndcg@3: 0.804333	valid_0's ndcg@5: 0.824963
+Early stopping, best iteration is:
+[21]	valid_0's ndcg@1: 0.732387	valid_0's ndcg@3: 0.806651	valid_0's ndcg@5: 0.828128
+[sweep] tag-mask alpha
+  no_mask      target=0.7314 all=0.6399 raw_web_target=0.4812 workflow_target=0.9891
+  hard_rw      target=0.7314 all=0.6399 raw_web_target=0.4812 workflow_target=0.9891
+  dom_b100_rw  target=0.6908 all=0.6047 raw_web_target=0.4012 workflow_target=0.9891
+  dom_b50_rw   target=0.6908 all=0.6047 raw_web_target=0.4012 workflow_target=0.9891
+  dom_b20_rw   target=0.6908 all=0.6047 raw_web_target=0.4012 workflow_target=0.9891
+  dom_b5_rw    target=0.6908 all=0.6047 raw_web_target=0.4012 workflow_target=0.9891
+  dom_b1_rw    target=0.6908 all=0.6047 raw_web_target=0.4012 workflow_target=0.9891
+[sweep] best: no_mask all_match=0.6399
+[metrics]
+tag_model_acc: 0.838552
+tag_model_top3_acc: 0.973092
+tag_model_top5_acc: 0.993151
+target_id_acc: 0.731409
+target_top3_acc: 0.862524
+target_top5_acc: 0.914384
+op_acc: 0.946184
+value_acc: 0.857632
+all_match_acc: 0.639922
+workflow_target_id_acc: 0.989076
+workflow_all_match_acc: 0.959285
+raw_web_target_id_acc: 0.481196
+raw_web_all_match_acc: 0.329797
+ensemble_size: 2
+rank_features: 59
+tag_best_iteration: 0
+mask_sweep: [{'name': 'no_mask', 'mode': 'none', 'alpha': 0.0, 'raw_web_only': True, 'target_id_acc': 0.7314090019569471, 'target_top3_acc': 0.8625244618395304, 'target_top5_acc': 0.9143835616438356, 'op_acc': 0.9461839530332681, 'value_acc': 0.8576320939334638, 'all_match_acc': 0.639921722113503, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.4811957569913211, 'raw_web_all_match_acc': 0.32979749276759884}, {'name': 'hard_rw', 'mode': 'hard', 'alpha': 0.0, 'raw_web_only': True, 'target_id_acc': 0.7314090019569471, 'target_top3_acc': 0.8625244618395304, 'target_top5_acc': 0.9143835616438356, 'op_acc': 0.9461839530332681, 'value_acc': 0.8576320939334638, 'all_match_acc': 0.639921722113503, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.4811957569913211, 'raw_web_all_match_acc': 0.32979749276759884}, {'name': 'dom_b100_rw', 'mode': 'dom_order', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 100.0, 'target_id_acc': 0.6908023483365949, 'target_top3_acc': 0.839041095890411, 'target_top5_acc': 0.9070450097847358, 'op_acc': 0.9456947162426614, 'value_acc': 0.8595890410958904, 'all_match_acc': 0.6046966731898239, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.40115718418514945, 'raw_web_all_match_acc': 0.26036644165863065}, {'name': 'dom_b50_rw', 'mode': 'dom_order', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 50.0, 'target_id_acc': 0.6908023483365949, 'target_top3_acc': 0.839041095890411, 'target_top5_acc': 0.9070450097847358, 'op_acc': 0.9456947162426614, 'value_acc': 0.8595890410958904, 'all_match_acc': 0.6046966731898239, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.40115718418514945, 'raw_web_all_match_acc': 0.26036644165863065}, {'name': 'dom_b20_rw', 'mode': 'dom_order', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 20.0, 'target_id_acc': 0.6908023483365949, 'target_top3_acc': 0.839041095890411, 'target_top5_acc': 0.9070450097847358, 'op_acc': 0.9456947162426614, 'value_acc': 0.8595890410958904, 'all_match_acc': 0.6046966731898239, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.40115718418514945, 'raw_web_all_match_acc': 0.26036644165863065}, {'name': 'dom_b5_rw', 'mode': 'dom_order', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 5.0, 'target_id_acc': 0.6908023483365949, 'target_top3_acc': 0.839041095890411, 'target_top5_acc': 0.9070450097847358, 'op_acc': 0.9456947162426614, 'value_acc': 0.8595890410958904, 'all_match_acc': 0.6046966731898239, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.40115718418514945, 'raw_web_all_match_acc': 0.26036644165863065}, {'name': 'dom_b1_rw', 'mode': 'dom_order', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 1.0, 'target_id_acc': 0.6908023483365949, 'target_top3_acc': 0.839041095890411, 'target_top5_acc': 0.9070450097847358, 'op_acc': 0.9456947162426614, 'value_acc': 0.8595890410958904, 'all_match_acc': 0.6046966731898239, 'workflow_target_id_acc': 0.9890764647467726, 'workflow_all_match_acc': 0.9592850049652433, 'raw_web_target_id_acc': 0.40115718418514945, 'raw_web_all_match_acc': 0.26036644165863065}]
+best_mask: {'name': 'no_mask', 'mode': 'none', 'alpha': 0.0, 'raw_web_only': True, 'dom_bonus': 100.0}
+[refit] full train
+ - ranker_seed42 final_iters=250
+ - ranker_seed77 final_iters=250
+[predict] test
+test source: D:\Dev_Projects\디지털 경진대회 2026\contest_prac\data\test.csv
+submission rows: 4417
+workflow-only garbage rows: 2210
+saved: D:\Dev_Projects\디지털 경진대회 2026\contest_prac\HyoungGyu\training\v6

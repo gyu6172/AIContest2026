@@ -1,6 +1,9 @@
 # somenna	0.5917	0.7287	0.9520	0.8449	98.6%
 # somenna	0.6461	0.7367	0.9515	0.8934	98.7%
 
+# v7
+# 6	somenna	0.6445	0.7335	0.9515	0.8945	98.6%
+
 from __future__ import annotations
 
 import argparse
@@ -1194,13 +1197,16 @@ def apply_tag_mask(
         as_text(rid): tag_proba[i] for i, rid in enumerate(row_df["id"])
     }
     html_type_by_id: dict[str, str] = {
-        as_text(rid): as_text(ht)
-        for rid, ht in zip(row_df["id"], row_df["html_type"])
+        as_text(rid): as_text(ht) for rid, ht in zip(row_df["id"], row_df["html_type"])
     }
     new_scores = scores.copy().astype(float)
     cand_ids = cand_df["id"].astype(str).to_numpy()
     cand_tags = cand_df["candidate_tag"].fillna("").astype(str).to_numpy()
-    cand_idxs = cand_df["candidate_idx"].astype(int).to_numpy() if "candidate_idx" in cand_df.columns else np.zeros(len(cand_df), dtype=int)
+    cand_idxs = (
+        cand_df["candidate_idx"].astype(int).to_numpy()
+        if "candidate_idx" in cand_df.columns
+        else np.zeros(len(cand_df), dtype=int)
+    )
     label_to_idx = {label: idx for idx, label in enumerate(label_encoder.classes_)}
     for i in range(len(cand_df)):
         rid = cand_ids[i]
@@ -1229,6 +1235,158 @@ def apply_tag_mask(
                 new_scores[i] -= hard_penalty
             else:
                 new_scores[i] += dom_bonus - float(cand_idxs[i])
+    return new_scores
+
+
+def tag_to_predicted_op(tag: str) -> str:
+    t = (tag or "").lower()
+    if t == "select":
+        return "SELECT"
+    if t == "textarea":
+        return "TYPE"
+    if t == "input":
+        return "TYPE"
+    return "CLICK"
+
+
+def apply_op_conditioned(
+    scores: np.ndarray,
+    cand_df: pd.DataFrame,
+    row_df: pd.DataFrame,
+    tag_proba: np.ndarray,
+    label_encoder: LabelEncoder,
+    select_mode: str = "override",
+    type_mode: str = "blend",
+    select_bonus: float = 1000.0,
+    type_alpha: float = 5.0,
+    select_min_match: int = 1,
+) -> np.ndarray:
+    """row-level predicted_op으로 candidate 점수를 op-conditioned 방식으로 보정.
+
+    select_mode:
+      "override" — predicted SELECT row에서 옵션-task 매칭 최대 후보를 강제로 top1
+      "blend"    — bonus를 가산만 (override 안 함)
+      "off"      — 손대지 않음
+    type_mode:
+      "blend"    — predicted TYPE row에서 field-blob ∩ remain_tokens × type_alpha 가산
+      "override" — value-pattern + field hint가 매칭되는 후보를 강제로 top1
+      "off"      — 손대지 않음
+    CLICK row는 항상 ranker 그대로.
+    """
+    if select_mode == "off" and type_mode == "off":
+        return scores.copy()
+
+    proba_by_id = {as_text(rid): tag_proba[i] for i, rid in enumerate(row_df["id"])}
+    pred_op_by_row: dict[str, str] = {}
+    for rid, probs in proba_by_id.items():
+        if probs is None or len(probs) == 0:
+            continue
+        top_tag = label_encoder.classes_[int(np.argmax(probs))]
+        pred_op_by_row[rid] = tag_to_predicted_op(top_tag)
+
+    task_by_id: dict[str, str] = {
+        as_text(rid): as_text(t)
+        for rid, t in zip(row_df["id"], row_df["task_raw"].fillna(row_df["task_clean"]))
+    }
+    task_tokens_by_id: dict[str, set[str]] = {
+        as_text(rid): {tok.lower() for tok in json_loads(tj, [])}
+        for rid, tj in zip(row_df["id"], row_df["task_tokens_json"])
+    }
+    history_tokens_by_id: dict[str, set[str]] = {}
+    for rid, hsj in zip(row_df["id"], row_df["history_steps_json"]):
+        steps = json_loads(hsj, [])
+        toks: set[str] = set()
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                toks.update(tokenize(step.get("text", "")))
+                toks.update(tokenize(step.get("value", "")))
+        history_tokens_by_id[as_text(rid)] = toks
+
+    new_scores = scores.copy().astype(float)
+
+    cand_ids = cand_df["id"].astype(str).to_numpy()
+    starts: dict[str, int] = {}
+    for i, rid in enumerate(cand_ids):
+        if rid not in starts:
+            starts[rid] = i
+    for rid, start in starts.items():
+        end = start
+        while end < len(cand_ids) and cand_ids[end] == rid:
+            end += 1
+        group_idx = list(range(start, end))
+        pred_op = pred_op_by_row.get(rid, "CLICK")
+        task_tokens = task_tokens_by_id.get(rid, set())
+        history_tokens = history_tokens_by_id.get(rid, set())
+        remain_tokens = task_tokens - history_tokens
+        task_text = task_by_id.get(rid, "")
+
+        if pred_op == "SELECT" and select_mode != "off":
+            best_local = -1
+            best_match = 0
+            for k in group_idx:
+                cand_tag = as_text(cand_df["candidate_tag"].iloc[k]).lower()
+                if cand_tag != "select":
+                    continue
+                opts = json_loads(cand_df["candidate_options_json"].iloc[k], [])
+                if not isinstance(opts, list):
+                    continue
+                local_match = 0
+                for opt in opts:
+                    opt_toks = set(tokenize(opt))
+                    overlap = len(opt_toks & remain_tokens)
+                    if overlap > local_match:
+                        local_match = overlap
+                if local_match > best_match:
+                    best_match = local_match
+                    best_local = k
+            if best_local >= 0 and best_match >= select_min_match:
+                if select_mode == "override":
+                    new_scores[best_local] += select_bonus
+                elif select_mode == "blend":
+                    new_scores[best_local] += float(best_match) * type_alpha
+
+        if pred_op == "TYPE" and type_mode != "off":
+            has_email = bool(EMAIL_RE.search(task_text))
+            has_date = bool(ISO_DATE_RE.search(task_text))
+            has_code = bool(CODE_RE.search(task_text))
+            has_money = bool(MONEY_RE.search(task_text))
+            for k in group_idx:
+                cand_tag = as_text(cand_df["candidate_tag"].iloc[k]).lower()
+                cand_type = as_text(cand_df["candidate_type"].iloc[k]).lower()
+                if cand_tag == "input" and cand_type in CLICK_INPUT_TYPES:
+                    continue
+                if cand_tag not in {"input", "textarea"}:
+                    continue
+                blob_parts = [
+                    cand_df["candidate_label"].iloc[k],
+                    cand_df["candidate_name"].iloc[k],
+                    cand_df["candidate_field_key"].iloc[k],
+                    cand_df["candidate_placeholder"].iloc[k],
+                ]
+                blob = " ".join(norm_key(p) for p in blob_parts)
+                blob_tokens = set(tokenize(blob))
+                token_overlap = len(blob_tokens & remain_tokens)
+                pattern_bonus = 0.0
+                if has_email and "email" in blob:
+                    pattern_bonus += 3.0
+                if has_date and "date" in blob:
+                    pattern_bonus += 3.0
+                if has_code and any(
+                    k in blob for k in ["id", "code", "serial", "asset", "mission"]
+                ):
+                    pattern_bonus += 3.0
+                if has_money and any(
+                    k in blob for k in ["amount", "price", "quantity", "limit"]
+                ):
+                    pattern_bonus += 3.0
+                if type_mode == "blend":
+                    new_scores[k] += float(token_overlap) * type_alpha + pattern_bonus
+                elif type_mode == "override":
+                    if (token_overlap + pattern_bonus) > 0:
+                        new_scores[k] += select_bonus
+
     return new_scores
 
 
@@ -1486,35 +1644,97 @@ def run_training(args: argparse.Namespace) -> None:
     val_scores = np.mean(val_score_parts, axis=0)
 
     mask_configs = [
-        {"name": "no_mask", "mode": "none", "alpha": 0.0, "raw_web_only": True},
-        {"name": "hard_rw", "mode": "hard", "alpha": 0.0, "raw_web_only": True},
-        {"name": "dom_b100_rw", "mode": "dom_order", "alpha": 0.0, "raw_web_only": True, "dom_bonus": 100.0},
-        {"name": "dom_b50_rw", "mode": "dom_order", "alpha": 0.0, "raw_web_only": True, "dom_bonus": 50.0},
-        {"name": "dom_b20_rw", "mode": "dom_order", "alpha": 0.0, "raw_web_only": True, "dom_bonus": 20.0},
-        {"name": "dom_b5_rw", "mode": "dom_order", "alpha": 0.0, "raw_web_only": True, "dom_bonus": 5.0},
-        {"name": "dom_b1_rw", "mode": "dom_order", "alpha": 0.0, "raw_web_only": True, "dom_bonus": 1.0},
+        {
+            "name": "baseline",
+            "kind": "tag_mask",
+            "mode": "none",
+            "alpha": 0.0,
+            "raw_web_only": True,
+        },
+        {
+            "name": "op_select_only",
+            "kind": "op_cond",
+            "select_mode": "override",
+            "type_mode": "off",
+        },
+        {
+            "name": "op_type_only",
+            "kind": "op_cond",
+            "select_mode": "off",
+            "type_mode": "blend",
+            "type_alpha": 5.0,
+        },
+        {
+            "name": "op_select+type_blend",
+            "kind": "op_cond",
+            "select_mode": "override",
+            "type_mode": "blend",
+            "type_alpha": 5.0,
+        },
+        {
+            "name": "op_select+type_blend_hi",
+            "kind": "op_cond",
+            "select_mode": "override",
+            "type_mode": "blend",
+            "type_alpha": 10.0,
+        },
+        {
+            "name": "op_select+type_override",
+            "kind": "op_cond",
+            "select_mode": "override",
+            "type_mode": "override",
+        },
     ]
+
+    def apply_cfg(
+        cfg: dict[str, Any],
+        scores: np.ndarray,
+        cands: pd.DataFrame,
+        rows: pd.DataFrame,
+        tprob: np.ndarray,
+        tenc: LabelEncoder,
+    ) -> np.ndarray:
+        kind = cfg.get("kind", "tag_mask")
+        if kind == "tag_mask":
+            return apply_tag_mask(
+                scores,
+                cands,
+                rows,
+                tprob,
+                tenc,
+                mode=cfg.get("mode", "none"),
+                alpha=cfg.get("alpha", 0.0),
+                raw_web_only=cfg.get("raw_web_only", True),
+                dom_bonus=cfg.get("dom_bonus", 100.0),
+            )
+        if kind == "op_cond":
+            return apply_op_conditioned(
+                scores,
+                cands,
+                rows,
+                tprob,
+                tenc,
+                select_mode=cfg.get("select_mode", "off"),
+                type_mode=cfg.get("type_mode", "off"),
+                select_bonus=cfg.get("select_bonus", 1000.0),
+                type_alpha=cfg.get("type_alpha", 5.0),
+                select_min_match=cfg.get("select_min_match", 1),
+            )
+        return scores.copy()
+
     sweep_summaries: list[dict[str, Any]] = []
-    print("[sweep] tag-mask alpha")
+    print("[sweep] op-conditioned modes")
     for cfg in mask_configs:
-        masked_scores = apply_tag_mask(
-            val_scores,
-            val_cands,
-            val_rows,
-            val_tag_proba,
-            tag_encoder,
-            mode=cfg["mode"],
-            alpha=cfg["alpha"],
-            raw_web_only=cfg["raw_web_only"],
-            dom_bonus=cfg.get("dom_bonus", 100.0),
+        adj_scores = apply_cfg(
+            cfg, val_scores, val_cands, val_rows, val_tag_proba, tag_encoder
         )
-        pred_cfg = predict_from_scores(val_cands, val_rows, masked_scores, g_val)
+        pred_cfg = predict_from_scores(val_cands, val_rows, adj_scores, g_val)
         pred_cfg = enforce_non_click_values(pred_cfg, val_rows, val_cands)
         m = evaluate_predictions(pred_cfg)
         summary = {"name": cfg["name"], **cfg, **m}
         sweep_summaries.append(summary)
         print(
-            f"  {cfg['name']:12s} target={m.get('target_id_acc', 0):.4f} "
+            f"  {cfg['name']:28s} target={m.get('target_id_acc', 0):.4f} "
             f"all={m.get('all_match_acc', 0):.4f} "
             f"raw_web_target={m.get('raw_web_target_id_acc', 0):.4f} "
             f"workflow_target={m.get('workflow_target_id_acc', 0):.4f}"
@@ -1522,20 +1742,26 @@ def run_training(args: argparse.Namespace) -> None:
 
     best = max(sweep_summaries, key=lambda s: s.get("all_match_acc", 0.0))
     print(f"[sweep] best: {best['name']} all_match={best['all_match_acc']:.4f}")
-    best_mask_cfg = {
-        "mode": best["mode"],
-        "alpha": best["alpha"],
-        "raw_web_only": best["raw_web_only"],
-        "dom_bonus": best.get("dom_bonus", 100.0),
+    best_cfg = {
+        k: v
+        for k, v in best.items()
+        if k
+        not in {
+            "target_id_acc",
+            "target_top3_acc",
+            "target_top5_acc",
+            "op_acc",
+            "value_acc",
+            "all_match_acc",
+            "workflow_target_id_acc",
+            "workflow_all_match_acc",
+            "raw_web_target_id_acc",
+            "raw_web_all_match_acc",
+        }
     }
 
-    val_scores_final = apply_tag_mask(
-        val_scores,
-        val_cands,
-        val_rows,
-        val_tag_proba,
-        tag_encoder,
-        **best_mask_cfg,
+    val_scores_final = apply_cfg(
+        best_cfg, val_scores, val_cands, val_rows, val_tag_proba, tag_encoder
     )
     pred_val = predict_from_scores(val_cands, val_rows, val_scores_final, g_val)
     pred_val = enforce_non_click_values(pred_val, val_rows, val_cands)
@@ -1544,7 +1770,7 @@ def run_training(args: argparse.Namespace) -> None:
     metrics["rank_features"] = X_trn.shape[1]
     metrics["tag_best_iteration"] = int(tag_model.best_iteration_ or 0)
     metrics["mask_sweep"] = sweep_summaries
-    metrics["best_mask"] = {"name": best["name"], **best_mask_cfg}
+    metrics["best_cfg"] = best_cfg
     print("[metrics]")
     for key, value in metrics.items():
         print(f"{key}: {value:.6f}" if isinstance(value, float) else f"{key}: {value}")
@@ -1622,7 +1848,7 @@ def run_training(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "model_summaries": model_summaries,
         "final_iterations": final_iterations,
-        "best_mask_cfg": best_mask_cfg,
+        "best_cfg": best_cfg,
     }
     joblib.dump(bundle, OUTPUT_DIR / "lgbm_ranker_v6_bundle.joblib")
     joblib.dump(
@@ -1652,13 +1878,8 @@ def run_training(args: argparse.Namespace) -> None:
     )
     g_test = group_sizes(test_cands)
     test_scores = np.mean([model.predict(X_test) for model in final_rankers], axis=0)
-    test_scores = apply_tag_mask(
-        test_scores,
-        test_cands,
-        test_rows,
-        test_tag_proba,
-        final_tag_encoder,
-        **best_mask_cfg,
+    test_scores = apply_cfg(
+        best_cfg, test_scores, test_cands, test_rows, test_tag_proba, final_tag_encoder
     )
     pred_test = predict_from_scores(test_cands, test_rows, test_scores, g_test)
     pred_test = enforce_non_click_values(pred_test, test_rows, test_cands)
