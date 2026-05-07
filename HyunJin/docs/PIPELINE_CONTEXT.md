@@ -174,7 +174,7 @@ SFT config:
 
 `src/inference.py`:
 
-1. Reads `data/train.csv`, `data/test.csv`, `data/sample_submission.csv`.
+1. Reads `data/train.csv`, `data/test.csv`, `data/somenna_submission.csv`.
 2. Builds empirical priors from all train rows.
 3. Builds retriever from all train rows.
 4. Loads `lora_model/` if it exists.

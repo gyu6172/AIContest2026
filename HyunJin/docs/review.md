@@ -64,7 +64,7 @@ train.csv → build_site_templates() → predict_by_template() → LLM → submi
 ## 5. 최종 결과 저장
 
 - `results_dict`에 없는 id → CLICK + 첫 번째 candidate_id로 safe default
-- `sample_submission.csv`로 merge하여 id 순서 보장
+- `somenna_submission.csv`로 merge하여 id 순서 보장
 - `fillna("")`로 결측값 처리 후 저장
 
 ---
@@ -90,7 +90,7 @@ train.csv (전체)
 ├── data/
 │   ├── train.csv
 │   ├── test.csv
-│   └── sample_submission.csv   ← somenna_submission.csv와 동일 내용
+│   └── somenna_submission.csv
 ├── src/
 │   ├── train.py
 │   ├── inference.py

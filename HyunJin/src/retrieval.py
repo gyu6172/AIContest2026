@@ -110,22 +110,3 @@ class ExampleRetriever:
         return results[:k]
 
 
-def format_similar_examples(examples, max_task_chars=None, max_history_chars=None):
-    if not examples:
-        return "[Similar Past Examples]\nNone"
-
-    def _trunc(s, n):
-        if n is None or s is None:
-            return s
-        s = str(s)
-        return s if len(s) <= n else s[:n].rstrip() + "..."
-
-    lines = ["[Similar Past Examples]"]
-    for i, ex in enumerate(examples, 1):
-        lines.extend([
-            f"Example {i}:",
-            f"  Task: {_trunc(ex.get('task', ''), max_task_chars)}",
-            f"  History: {_trunc(ex.get('history', ''), max_history_chars)}",
-            f"  Action: op={ex.get('target_op', '')}, label=\"{ex.get('target_label', '')}\", value=\"{ex.get('target_value', '')}\"",
-        ])
-    return "\n".join(lines)

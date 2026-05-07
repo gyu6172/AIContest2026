@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pandas as pd
 import json
 import re
@@ -5,6 +6,11 @@ from collections import Counter
 from typing import Any
 
 CONSISTENCY_DEBUG = Counter()
+
+
+# ─────────────────────────────────────────────
+# 기본 파싱 유틸리티
+# ─────────────────────────────────────────────
 
 def parse_attrs_str(attrs_str: str) -> dict:
     result = {}
@@ -21,8 +27,9 @@ def parse_attrs_str(attrs_str: str) -> dict:
             result[key] = value
     return result
 
+
 def get_history_signature(history_str):
-    """History의 op 시퀀스를 시그니처로 사용하여 워크플로우 분기(Branch) 구별"""
+    """History의 op 시퀀스를 시그니처로 사용하여 워크플로우 분기 구별."""
     if pd.isna(history_str) or not str(history_str).strip():
         return "START"
     ops = re.findall(r'->\s*(CLICK|TYPE|SELECT)', str(history_str))
@@ -30,163 +37,26 @@ def get_history_signature(history_str):
         return "STEP_" + str(len(re.findall(r'Step \d+:', str(history_str))) + 1)
     return ",".join(ops)
 
-def build_empirical_priors(train_df):
-    """Build weak empirical priors that do not depend on history flow.
 
-    These priors are intended for prompt context / tie-breaking only. They
-    deliberately avoid `(site_token, history_signature)` next-step templates.
-    """
-    priors = {
-        'global_op': Counter(),
-        'global_tag_op': {},
-        'site_tag_op': {},
-        'site_labels': {},
-    }
-
-    tag_op_counts = {}
-    site_tag_op_counts = {}
-    site_label_counts = {}
-
-    for _, row in train_df.iterrows():
-        op = str(row.get('op', 'CLICK'))
-        site = str(row.get('site_token', ''))
-        priors['global_op'][op] += 1
-
-        try:
-            candidates = json.loads(row.get('candidate_elements', '[]'))
-        except Exception:
-            candidates = []
-
-        target_id = str(row.get('target_id', ''))
-        target = next((c for c in candidates if str(c.get('candidate_id', '')) == target_id), None)
-        if not target:
-            continue
-
-        tag = str(target.get('tag', '')).lower()
-        label = _candidate_label(target)
-
-        tag_op_counts.setdefault(tag, Counter())[op] += 1
-        site_tag_op_counts.setdefault(site, {}).setdefault(tag, Counter())[op] += 1
-        if label:
-            site_label_counts.setdefault(site, Counter())[(op, tag, label)] += 1
-
-    priors['global_op'] = dict(priors['global_op'])
-    priors['global_tag_op'] = {
-        tag: dict(counts) for tag, counts in tag_op_counts.items()
-    }
-    priors['site_tag_op'] = {
-        site: {tag: dict(counts) for tag, counts in per_tag.items()}
-        for site, per_tag in site_tag_op_counts.items()
-    }
-    priors['site_labels'] = {
-        site: [
-            {'op': item[0][0], 'tag': item[0][1], 'label': item[0][2], 'count': item[1]}
-            for item in counts.most_common(8)
-        ]
-        for site, counts in site_label_counts.items()
-    }
-    return priors
-
-def _format_counter_dist(counts, limit=None):
-    if not counts:
-        return "none"
-    items = Counter(counts).most_common(limit)
-    total = sum(counts.values()) or 1
-    return ", ".join(f"{k}={v / total:.1%}" for k, v in items)
-
-def format_empirical_priors(row, priors):
-    """Format weak priors for the LLM prompt."""
-    if not priors:
-        return "[Empirical Priors]\nNone"
-
-    site = str(row.get('site_token', ''))
-    lines = [
-        "[Empirical Priors]",
-        "Task and current candidates are the primary evidence. Use these priors only as weak tie-breakers.",
-        f"Global op distribution: {_format_counter_dist(priors.get('global_op', {}))}",
-    ]
-
-    global_tag_op = priors.get('global_tag_op', {})
-    if global_tag_op:
-        tag_lines = []
-        for tag, counts in sorted(global_tag_op.items()):
-            tag_lines.append(f"{tag or 'unknown'} -> {_format_counter_dist(counts)}")
-        lines.append("Global tag/op: " + "; ".join(tag_lines[:8]))
-
-    site_tag_op = priors.get('site_tag_op', {}).get(site, {})
-    if site_tag_op:
-        tag_lines = []
-        for tag, counts in sorted(site_tag_op.items()):
-            tag_lines.append(f"{tag or 'unknown'} -> {_format_counter_dist(counts)}")
-        lines.append("This-site tag/op: " + "; ".join(tag_lines[:8]))
-
-    site_labels = priors.get('site_labels', {}).get(site, [])
-    if site_labels:
-        formatted = [
-            f"{x['op']} {x['tag']} \"{x['label']}\" ({x['count']})"
-            for x in site_labels[:6]
-        ]
-        lines.append("This-site common labels: " + "; ".join(formatted))
-
-    return "\n".join(lines)
-
-def _legacy_extract_value_from_task(task: str, op: str, attrs: str) -> str:
-    if op == 'CLICK':
-        return ""
-
-    task_str = str(task)
-
-    # 1. SELECT: options matching first
-    if op == 'SELECT' and 'options=' in attrs:
-        options = _parse_options(attrs)
-        task_lower = task_str.lower()
-        # Exact substring match
-        for opt in options:
-            if opt.lower() in task_lower:
-                return opt
-        # Fuzzy: token overlap
-        best_opt, best_score = None, 0
-        task_words = set(re.findall(r'\w+', task_lower))
-        for opt in options:
-            opt_words = set(re.findall(r'\w+', opt.lower()))
-            score = len(opt_words & task_words) / max(len(opt_words), 1)
-            if score > best_score:
-                best_score, best_opt = score, opt
-        if best_opt and best_score >= 0.5:
-            return best_opt
-
-    # 2. Quoted value (SELECT도 포함 — options 매칭 실패 시 fallback)
-    m = re.search(r'["\'](.*?)["\']', task_str)
-    if m:
-        return m.group(1)
-
-    # 3. Field-label based extraction for TYPE
-    # Parse label or placeholder from attrs, find it in task, extract following text
-    if op == 'TYPE':
-        attrs_dict = parse_attrs_str(attrs)
-        field_label = attrs_dict.get('label', '') or attrs_dict.get('placeholder', '') or attrs_dict.get('aria-label', '')
-        if field_label:
-            idx = task_str.lower().find(field_label.lower())
-            if idx != -1:
-                after = task_str[idx + len(field_label):].strip()
-                # Extract first meaningful chunk (stop at comma, period, or end)
-                chunk = re.split(r'[,\.;]', after)[0].strip()
-                if chunk:
-                    return chunk
-
-    # 4. Date pattern fallback
-    date_m = re.search(r'\d{4}-\d{2}-\d{2}', task_str)
-    if date_m:
-        return date_m.group(0)
-
-    return ""
+# ─────────────────────────────────────────────
+# Value 추출
+# ─────────────────────────────────────────────
 
 def extract_value_from_task(task: str, op: str, attrs: str) -> str:
+    """task 문장에서 TYPE/SELECT에 필요한 value를 추출한다.
+
+    우선순위:
+    1. SELECT: options= 중 task에 등장하는 옵션 (exact → fuzzy)
+    2. 따옴표 패턴
+    3. TYPE: label/placeholder 기반 뒤따르는 청크
+    4. 날짜 regex
+    5. 빈 문자열
+    """
     op = str(op or 'CLICK').upper()
     if op == 'CLICK':
         return ""
 
-    task_str = "" if task is None or pd.isna(task) else str(task)
+    task_str  = "" if task is None or pd.isna(task) else str(task)
     attrs_str = "" if attrs is None or pd.isna(attrs) else str(attrs)
 
     try:
@@ -206,7 +76,7 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
             if best_opt and best_score >= 0.5:
                 return best_opt
 
-        quoted = re.search(r'["\']([^"\']+)["\']', task_str)
+        quoted = re.search(r'["\'"]([^"\']+)["\'"]', task_str)
         if quoted:
             return quoted.group(1).strip()
 
@@ -220,7 +90,7 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
             ]
             for field_label in [x for x in field_labels if x]:
                 label_pattern = re.escape(str(field_label).strip())
-                match = re.search(label_pattern + r'\s*(?:is|as|to|:|-)?\s*([^,.;\n]+)', task_str, flags=re.IGNORECASE)
+                match = re.search(label_pattern + r'\s*(?:is|as|to|:|-)??\s*([^,.;\n]+)', task_str, flags=re.IGNORECASE)
                 if match:
                     value = match.group(1).strip().strip('"\'')
                     if value:
@@ -234,12 +104,22 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
 
     return ""
 
+
+# ─────────────────────────────────────────────
+# 내부 유틸리티
+# ─────────────────────────────────────────────
+
 def _candidate_label(c):
     label = str(c.get('text', '')).strip().lower()
     if not label:
         attrs_dict = parse_attrs_str(str(c.get('attrs', '')))
-        label = str(attrs_dict.get('aria-label', '') or attrs_dict.get('placeholder', '') or attrs_dict.get('label', '')).strip().lower()
+        label = str(
+            attrs_dict.get('aria-label', '') or
+            attrs_dict.get('placeholder', '') or
+            attrs_dict.get('label', '')
+        ).strip().lower()
     return label
+
 
 def _parse_options(attrs: str):
     if attrs is None or pd.isna(attrs):
@@ -249,8 +129,10 @@ def _parse_options(attrs: str):
         return []
     return [o.strip() for o in opts_str.split(' / ') if o.strip()]
 
+
 def _token_set(text: str):
     return set(re.findall(r'\w+', str(text).lower()))
+
 
 def _candidate_match_score(candidate: dict[str, Any], task: str) -> float:
     task_lower = str(task).lower()
@@ -267,15 +149,17 @@ def _candidate_match_score(candidate: dict[str, Any], task: str) -> float:
         if len(word) > 2 and word in task_lower:
             score += 1.0
     label_words = _token_set(' '.join(str(f) for f in fields))
-    task_words = _token_set(task)
+    task_words  = _token_set(task)
     if label_words:
         score += len(label_words & task_words) / max(len(label_words), 1)
     return score
+
 
 def _best_candidate(pool, task: str):
     if not pool:
         return None
     return max(pool, key=lambda c: (_candidate_match_score(c, task), str(c.get('candidate_id', ''))))
+
 
 def _best_option_for_task(options, task: str, current_value: str = ""):
     if not options:
@@ -306,17 +190,23 @@ def _best_option_for_task(options, task: str, current_value: str = ""):
             best_score, best_opt = score, opt
     return best_opt or options[0]
 
+
+# ─────────────────────────────────────────────
+# Consistency Guard
+# ─────────────────────────────────────────────
+
 def reset_consistency_debug():
     CONSISTENCY_DEBUG.clear()
+
 
 def get_consistency_debug():
     return dict(CONSISTENCY_DEBUG)
 
-def enforce_consistency(pred, candidates):
-    """Final guardrail for op/tag/value consistency.
 
-    Optional keys `_task` and `_row` may be supplied by callers for better repair
-    scoring; private keys are removed before returning.
+def enforce_consistency(pred, candidates):
+    """최종 가드레일: op/tag/value 일관성을 강제한다.
+
+    선택적 키 `_task`는 수리 점수 계산에 사용되며, 반환 전에 제거된다.
     """
     task = str(pred.get('_task', '')) if isinstance(pred, dict) else ''
     pred = dict(pred or {})
@@ -329,9 +219,9 @@ def enforce_consistency(pred, candidates):
         op = 'CLICK'
         CONSISTENCY_DEBUG['bad_op_to_click'] += 1
 
-    cand_map = {str(c.get('candidate_id', '')): c for c in candidates}
+    cand_map  = {str(c.get('candidate_id', '')): c for c in candidates}
     target_id = str(pred.get('target_id', ''))
-    value = "" if pd.isna(pred.get('value', '')) else str(pred.get('value', ''))
+    value     = "" if pd.isna(pred.get('value', '')) else str(pred.get('value', ''))
 
     if target_id not in cand_map:
         fb = fallback_rule_based({'task': task}, candidates)
@@ -339,27 +229,31 @@ def enforce_consistency(pred, candidates):
         CONSISTENCY_DEBUG['invalid_target_repaired'] += 1
 
     chosen = cand_map.get(str(target_id))
-    tag = str(chosen.get('tag', '')).lower() if chosen else ''
+    tag    = str(chosen.get('tag', '')).lower() if chosen else ''
 
     if op == 'TYPE' and tag not in {'input', 'textarea'}:
-        replacement = _best_candidate([c for c in candidates if str(c.get('tag', '')).lower() in {'input', 'textarea'}], task)
+        replacement = _best_candidate(
+            [c for c in candidates if str(c.get('tag', '')).lower() in {'input', 'textarea'}], task
+        )
         if replacement:
             target_id = str(replacement.get('candidate_id', ''))
-            chosen = replacement
-            tag = str(chosen.get('tag', '')).lower()
-            value = extract_value_from_task(task, 'TYPE', str(chosen.get('attrs', ''))) or value
+            chosen    = replacement
+            tag       = str(chosen.get('tag', '')).lower()
+            value     = extract_value_from_task(task, 'TYPE', str(chosen.get('attrs', ''))) or value
             CONSISTENCY_DEBUG['type_target_switched'] += 1
         else:
             op, value = 'CLICK', ''
             CONSISTENCY_DEBUG['type_downgraded_click'] += 1
 
     if op == 'SELECT' and tag != 'select':
-        replacement = _best_candidate([c for c in candidates if str(c.get('tag', '')).lower() == 'select'], task)
+        replacement = _best_candidate(
+            [c for c in candidates if str(c.get('tag', '')).lower() == 'select'], task
+        )
         if replacement:
             target_id = str(replacement.get('candidate_id', ''))
-            chosen = replacement
-            tag = str(chosen.get('tag', '')).lower()
-            value = extract_value_from_task(task, 'SELECT', str(chosen.get('attrs', ''))) or value
+            chosen    = replacement
+            tag       = str(chosen.get('tag', '')).lower()
+            value     = extract_value_from_task(task, 'SELECT', str(chosen.get('attrs', ''))) or value
             CONSISTENCY_DEBUG['select_target_switched'] += 1
         else:
             op, value = 'CLICK', ''
@@ -371,15 +265,17 @@ def enforce_consistency(pred, candidates):
             op, value = 'SELECT', extracted
             CONSISTENCY_DEBUG['click_select_upgraded'] += 1
         else:
-            replacement = _best_candidate([c for c in candidates if str(c.get('tag', '')).lower() in {'button', 'a'}], task)
+            replacement = _best_candidate(
+                [c for c in candidates if str(c.get('tag', '')).lower() in {'button', 'a'}], task
+            )
             if replacement:
                 target_id = str(replacement.get('candidate_id', ''))
-                chosen = replacement
-                tag = str(chosen.get('tag', '')).lower()
+                chosen    = replacement
+                tag       = str(chosen.get('tag', '')).lower()
                 CONSISTENCY_DEBUG['click_select_target_switched'] += 1
 
     if op == 'SELECT':
-        options = _parse_options(str(chosen.get('attrs', ''))) if chosen else []
+        options     = _parse_options(str(chosen.get('attrs', ''))) if chosen else []
         fixed_value = _best_option_for_task(options, task, value)
         if fixed_value != value:
             CONSISTENCY_DEBUG['select_value_repaired'] += 1
@@ -392,52 +288,10 @@ def enforce_consistency(pred, candidates):
 
     return {'op': op, 'target_id': str(target_id), 'value': value}
 
-def _removed_template_prediction(row, _unused_templates, candidates):
-    raise RuntimeError("Template prediction was removed; use LLM-first inference with empirical priors.")
 
-    """
-    # Try each template variant (top-3) in frequency order
-    for t in template_list:
-        for c in candidates:
-            c_label = _candidate_label(c)
-            c_tag = c.get('tag', '')
-            c_attrs = str(c.get('attrs', ''))
-
-            # Exact match
-            if c_label == t['label'] and c_tag == t['tag']:
-                # [Phase 1] Cross-Validation: 기계적 매칭 방지 (단, 텍스트가 아예 없는 요소는 예외 허용)
-                if t['label'] and not is_task_related(t['label']) and not is_task_related(str(c.get('text', '')).lower()):
-                    continue 
-                
-                val = extract_value_from_task(row['task'], t['op'], c_attrs)
-                conf = 1.0 if t == template_list[0] else 0.85
-                return {'op': t['op'], 'target_id': c.get('candidate_id'), 'value': val}, conf
-
-    # Fuzzy fallback: try best label match against top template
-    t = template_list[0]
-    t_words = t['label'].split()
-    # [Phase 1] 라벨이 2단어 이하이면 Fuzzy Fallback 금지 (오탐 방지)
-    if len(t_words) <= 2:
-        return None, 0.0
-
-    best_c, best_score = None, 0
-    for c in candidates:
-        c_label = _candidate_label(c)
-        if not c_label or not t['label']:
-            continue
-        c_words = c_label.split()
-        score = len(set(t_words) & set(c_words)) / max(len(t_words), 1)
-        if score > best_score and score >= 0.5:
-            if is_task_related(c_label):
-                best_score, best_c = score, c
-
-    if best_c:
-        c_attrs = str(best_c.get('attrs', ''))
-        val = extract_value_from_task(row['task'], t['op'], c_attrs)
-        return {'op': t['op'], 'target_id': best_c.get('candidate_id'), 'value': val}, 0.75
-
-    return None, 0.0
-    """
+# ─────────────────────────────────────────────
+# Rule-based Fallback
+# ─────────────────────────────────────────────
 
 def _infer_op_from_task(task: str) -> str:
     task_lower = str(task).lower()
@@ -449,8 +303,9 @@ def _infer_op_from_task(task: str) -> str:
         return "CLICK"
     return "CLICK"
 
+
 def _candidate_relevance_score(candidate: dict[str, Any], task: str, op: str) -> float:
-    tag = str(candidate.get('tag', '')).lower()
+    tag   = str(candidate.get('tag', '')).lower()
     attrs = str(candidate.get('attrs', ''))
     score = _candidate_match_score(candidate, task)
 
@@ -458,7 +313,7 @@ def _candidate_relevance_score(candidate: dict[str, Any], task: str, op: str) ->
         score += 2.0 if tag in {'input', 'textarea'} else -1.0
     elif op == "SELECT":
         score += 2.0 if tag == 'select' else -1.0
-        options = _parse_options(attrs)
+        options    = _parse_options(attrs)
         task_words = _token_set(task)
         for opt in options:
             opt_words = _token_set(opt)
@@ -471,11 +326,13 @@ def _candidate_relevance_score(candidate: dict[str, Any], task: str, op: str) ->
 
     return score
 
+
 def fallback_rule_based(row, candidates):
-    task = str(row['task'])
-    op = _infer_op_from_task(task)
+    """LLM 실패 시 rule 기반으로 op/target_id/value를 결정한다."""
+    task      = str(row['task'])
+    op        = _infer_op_from_task(task)
     target_id = candidates[0].get('candidate_id', '') if candidates else ""
-    value = ""
+    value     = ""
 
     def best_candidate(pool):
         if not pool:
@@ -497,16 +354,225 @@ def fallback_rule_based(row, candidates):
     chosen = best_candidate(pool) or best_candidate(candidates)
     if chosen:
         target_id = chosen.get('candidate_id', '')
-        value = extract_value_from_task(task, op, str(chosen.get('attrs', '')))
+        value     = extract_value_from_task(task, op, str(chosen.get('attrs', '')))
 
     if op == "CLICK":
         value = ""
 
     return {'op': op, 'target_id': target_id, 'value': value}
 
-def format_candidates_with_attrs(candidates):
-    """프롬프트에 attrs 정보를 포함하여 포맷팅 (정확히 15개 모두 사용)"""
-    cands_text = []
-    for c in candidates:
-        cands_text.append(f"- ID: {c.get('candidate_id','')}, Tag: {c.get('tag','')}, Text: {c.get('text','')}, Attrs: {c.get('attrs','')}")
-    return "\n".join(cands_text)
+
+# ─────────────────────────────────────────────
+# HTML 타입 감지 및 Workflow 컨텍스트 파싱
+# ─────────────────────────────────────────────
+
+def is_workflow_html(html_str) -> bool:
+    """Workflow형 HTML 여부 판별."""
+    if not isinstance(html_str, str):
+        return False
+    return ("workflow-context" in html_str) or ("completed-fields" in html_str)
+
+
+def detect_html_type(row) -> str:
+    """행의 cleaned_html을 보고 'workflow' 또는 'real_web' 반환."""
+    return "workflow" if is_workflow_html(str(row.get("cleaned_html", ""))) else "real_web"
+
+
+def extract_workflow_context(html_str) -> dict:
+    """Workflow HTML에서 현재 단계 및 완료된 필드 정보를 추출한다.
+
+    반환 예시:
+        {"current_step": "6", "total_steps": "7", "completed_fields": ["Name", "Date"]}
+    """
+    result = {"current_step": "", "total_steps": "", "completed_fields": []}
+    if not isinstance(html_str, str):
+        return result
+    step_m = re.search(r"current step\s+(\d+)\s+of\s+(\d+)", html_str, re.IGNORECASE)
+    if step_m:
+        result["current_step"] = step_m.group(1)
+        result["total_steps"]  = step_m.group(2)
+    completed_m = re.search(r"Completed:\s*([^\n<]+)", html_str, re.IGNORECASE)
+    if completed_m:
+        fields = [f.strip() for f in completed_m.group(1).split(",") if f.strip()]
+        result["completed_fields"] = fields
+    return result
+
+
+# ─────────────────────────────────────────────
+# 번호 기반 후보 포맷 및 변환
+# ─────────────────────────────────────────────
+
+def format_numbered_candidates(candidates) -> str:
+    """후보를 1~N 번호로 포맷팅한다.
+
+    LLM이 긴 ID 문자열을 생성하는 대신 숫자(1~15)만 선택하면 됨.
+    hallucination 및 형식 오류 대폭 감소.
+    """
+    lines = []
+    for i, c in enumerate(candidates, 1):
+        tag         = c.get("tag", "")
+        text        = str(c.get("text", "")).strip()
+        attrs       = str(c.get("attrs", "")).strip()
+        attrs_short = (attrs[:120] + "...") if len(attrs) > 120 else attrs
+
+        line = f"{i:>2}. [{tag}]"
+        if text:
+            line += f' "{text}"'
+        if attrs_short:
+            line += f" | {attrs_short}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def choice_to_candidate_id(choice, candidates) -> str:
+    """번호(1~N)를 실제 candidate_id로 변환한다.
+
+    변환 실패 시 빈 문자열 반환 → 호출자가 fallback 처리.
+    """
+    try:
+        idx = int(choice) - 1  # 1-indexed → 0-indexed
+        if 0 <= idx < len(candidates):
+            return str(candidates[idx].get("candidate_id", ""))
+    except (ValueError, TypeError):
+        pass
+    return ""
+
+
+# ─────────────────────────────────────────────
+# 임베딩 기반 후보 재정렬 (real_web 전용)
+# ─────────────────────────────────────────────
+
+def _candidate_description(c) -> str:
+    """후보 요소를 짧은 자연어로 변환한다. 있는 데이터만 사용 (할루시네이션 없음)."""
+    tag   = c.get("tag", "")
+    text  = str(c.get("text", "")).strip()
+    attrs = parse_attrs_str(str(c.get("attrs", "")))
+    label = (text
+             or attrs.get("aria-label", "")
+             or attrs.get("placeholder", "")
+             or attrs.get("label", "")
+             or attrs.get("name", ""))
+    options = attrs.get("options", "")
+    desc = f"{tag} {label}".strip()
+    if options:
+        desc += f" choices: {options[:60]}"
+    return desc
+
+
+_embedding_model = None
+
+
+def rerank_candidates_by_embedding(task: str, candidates: list) -> list:
+    """task 임베딩과의 코사인 유사도로 후보를 내림차순 정렬한다 (real_web 전용)."""
+    if not candidates:
+        return candidates
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    from sentence_transformers import util
+    descs     = [_candidate_description(c) for c in candidates]
+    task_emb  = _embedding_model.encode([task], convert_to_tensor=True)
+    cand_embs = _embedding_model.encode(descs,  convert_to_tensor=True)
+    scores    = util.cos_sim(task_emb, cand_embs)[0]
+    ranked    = scores.argsort(descending=True).tolist()
+    return [candidates[i] for i in ranked]
+
+
+# ─────────────────────────────────────────────
+# RAG 포맷팅 & 프롬프트 빌더
+# (train.py / inference.py 공용 — 이 파일만 수정하면 됨)
+# ─────────────────────────────────────────────
+RETRIEVAL_K             = 3
+RETRIEVAL_TASK_CHARS    = 150
+RETRIEVAL_HISTORY_CHARS = 150
+
+
+def format_similar_examples(examples, max_task_chars=None, max_history_chars=None):
+    if not examples:
+        return "[Similar Past Examples]\nNone"
+
+    def _trunc(s, n):
+        if n is None or s is None:
+            return s
+        s = str(s)
+        return s if len(s) <= n else s[:n].rstrip() + "..."
+
+    lines = ["[Similar Past Examples]"]
+    for i, ex in enumerate(examples, 1):
+        lines.extend([
+            f"Example {i}:",
+            f"  Task: {_trunc(ex.get('task', ''), max_task_chars)}",
+            f"  History: {_trunc(ex.get('history', ''), max_history_chars)}",
+            f"  Action: op={ex.get('target_op', '')}, label=\"{ex.get('target_label', '')}\", value=\"{ex.get('target_value', '')}\"",
+        ])
+    return "\n".join(lines)
+
+
+def build_prompt(row, candidates, retriever=None, k=RETRIEVAL_K, exclude_id=None):
+    """HTML 타입(workflow / real_web)에 따라 최적화된 프롬프트를 생성한다."""
+    html_type    = detect_html_type(row)
+    n            = len(candidates)
+    numbered     = format_numbered_candidates(candidates)
+    task_str     = str(row.get("task", ""))
+    history_str  = str(row.get("history", "")) or "None"
+
+    if html_type == "workflow":
+        ctx = extract_workflow_context(str(row.get("cleaned_html", "")))
+        step_hint = ""
+        if ctx["current_step"]:
+            step_hint = f"Progress: step {ctx['current_step']} of {ctx['total_steps']}"
+        completed_hint = ""
+        if ctx["completed_fields"]:
+            completed_hint = (
+                "Already completed (do NOT select these): "
+                + ", ".join(ctx["completed_fields"])
+            )
+
+        return f"""You are a web UI automation expert filling out a workflow form.
+Select the single best action from the numbered candidates below.
+
+[Candidate Elements] — choose one number (1-{n})
+{numbered}
+
+[Task]
+{task_str}
+
+[History]
+{history_str}
+
+[Workflow Status]
+{step_hint}
+{completed_hint}
+
+Output ONLY valid JSON:
+{{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "text to type or select, empty string for CLICK"}}"""
+
+    else:  # real_web
+        examples_text = ""
+        if retriever:
+            examples = retriever.query(row, k=k, exclude_id=exclude_id)
+            if examples:
+                examples_text = format_similar_examples(
+                    examples[:k],
+                    max_task_chars=RETRIEVAL_TASK_CHARS,
+                    max_history_chars=RETRIEVAL_HISTORY_CHARS,
+                )
+
+        return f"""You are a web UI automation expert controlling a real website.
+Select the single best action from the numbered candidates below.
+Candidates are ordered by relevance to the task — earlier numbers are more likely correct.
+
+[Candidate Elements] — choose one number (1-{n})
+{numbered}
+
+[Task]
+{task_str}
+
+[History]
+{history_str}
+
+{examples_text}
+
+Output ONLY valid JSON:
+{{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "text to type or select, empty string for CLICK"}}"""
