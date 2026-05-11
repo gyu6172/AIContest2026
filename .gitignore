@@ -6,21 +6,28 @@
 *.pt
 *.pth
 *.bin
+<<<<<<< HEAD
 *.joblib
 
 # Python cache and build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # IDE and tool specific
 .claude/
 .vscode/
+<<<<<<< HEAD
 .ipynb_checkpoints/
 
 # Project specific outputs/logs
 wandb/
 notebooks/viz_out/
+=======
+
+# Project specific data/outputs if large
+>>>>>>> 38b2d3431dc0a9da575beebcb766d24481e251f2
 HyunJin/outputs/
 HyunJin/lora_model/
 HyunJin/unsloth_compiled_cache/
