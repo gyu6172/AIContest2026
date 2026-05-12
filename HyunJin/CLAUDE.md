@@ -24,6 +24,8 @@ op 분포: CLICK 55.6% / TYPE 25.8% / SELECT 18.6%
 
 ## 1. 데이터 스키마
 
+
+
 | 컬럼 | 설명 |
 |------|------|
 | id | `aac_mix_train_XXXXXX` |

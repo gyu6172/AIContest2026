@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import argparse
 import torch
 import pandas as pd
 import json
@@ -20,8 +21,11 @@ from preprocess import (
     format_numbered_candidates,
     choice_to_candidate_id,
     build_prompt,
+    build_grounding_step1_prompt,
+    generate_action_desc,
     RETRIEVAL_K,
-    rerank_candidates_by_embedding,
+    generate_cot_reasoning,
+    hard_negative_shuffle,
 )
 from retrieval import ExampleRetriever
 
@@ -31,7 +35,7 @@ from retrieval import ExampleRetriever
 # ─────────────────────────────────────────────
 MAX_SEQ_LENGTH            = 2048
 EVAL_SAMPLE_SIZE          = 300   # None 이면 전체 검증
-USE_RETRIEVAL             = True
+USE_RETRIEVAL             = False
 USE_CONSISTENCY           = True
 VALIDATION_MODE           = True  # False 로 바꾸면 전체 데이터 학습
 FINAL_TRAIN_ON_FULL_DATA  = False # True 로 바꾸면 val 없이 전체 학습
@@ -40,7 +44,7 @@ FINAL_TRAIN_ON_FULL_DATA  = False # True 로 바꾸면 val 없이 전체 학습
 EXCLUDE_SITES = {"site_2aa627db"}
 
 # Augmentation & OOF
-SHUFFLE_AUGMENT_N    = 2          # 원본 1 + 셔플 N = (1+N)배 데이터
+SHUFFLE_AUGMENT_N    = 1          # 원본 1 + 셔플 N = (1+N)배 데이터 (real_web은 2배 적용)
 OOF_N_FOLDS          = 3          # OOF fold 수
 
 
@@ -48,13 +52,23 @@ OOF_N_FOLDS          = 3          # OOF fold 수
 # JSON 파싱
 # ─────────────────────────────────────────────
 
+def _parse_json_safe(text: str) -> dict | None:
+    """비중첩 JSON 블록을 역순으로 파싱 시도 (thinking 내 중괄호 오파싱 방지)."""
+    for m in reversed(list(re.finditer(r'\{[^{}]*\}', text, re.DOTALL))):
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def extract_json_answer(response, candidates):
     """LLM 응답에서 JSON을 파싱하고 choice 번호를 candidate_id로 변환한다."""
     try:
-        m = re.search(r'\{.*?\}', response, re.DOTALL)
-        if not m:
+        search_text = response.split('</think>', 1)[-1] if '</think>' in response else response
+        data = _parse_json_safe(search_text)
+        if data is None:
             return {"op": "CLICK", "target_id": "", "value": ""}
-        data = json.loads(m.group(0))
         op = str(data.get("op", "CLICK")).upper()
         if op not in ("CLICK", "TYPE", "SELECT"):
             op = "CLICK"
@@ -70,7 +84,13 @@ def extract_json_answer(response, candidates):
 # 학습 데이터 생성
 # ─────────────────────────────────────────────
 
-def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
+def prepare_training_data(
+    df,
+    retriever=None,
+    shuffle_n=SHUFFLE_AUGMENT_N,
+    realweb_aug_boost: int = 1,
+    compact_prompt: bool = False,
+):
     """SFT용 (instruction, output) 쌍을 생성한다.
 
     변경 사항:
@@ -78,7 +98,10 @@ def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
     - target_id가 candidates에 없는 행은 skip (데이터 오류)
     - shuffle_n > 0이면 candidate 순서를 셔플한 augmented 예시 추가
     """
-    print(f"Preparing training data (shuffle_n={shuffle_n})...")
+    print(
+        f"Preparing training data (shuffle_n={shuffle_n}, "
+        f"realweb_aug_boost={realweb_aug_boost}, compact_prompt={compact_prompt})..."
+    )
     instructions = []
     skipped = 0
 
@@ -88,10 +111,6 @@ def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
         except Exception:
             skipped += 1
             continue
-
-        # real_web이면 임베딩 기준 재정렬 (workflow는 원본 순서 유지)
-        if detect_html_type(row) == "real_web":
-            candidates = rerank_candidates_by_embedding(str(row.get("task", "")), candidates)
 
         target_id = str(row.get("target_id", ""))
         choice = None
@@ -114,15 +133,28 @@ def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
             retriever=retriever,
             k=RETRIEVAL_K,
             exclude_id=row.get("id"),
+            compact_candidates=compact_prompt,
         )
-        answer = json.dumps({"op": row["op"], "choice": choice, "value": val})
+        target_cand = next((c for c in candidates if str(c.get("candidate_id", "")) == target_id), {})
+        reasoning = generate_cot_reasoning(str(row.get("task", "")), row["op"], choice, target_cand, val, candidates=candidates)
+        # Qwen3 thinking format: <think>reasoning</think>\n{json}
+        answer = f"<think>\n{reasoning}\n</think>\n" + json.dumps({"op": row["op"], "choice": choice, "value": val})
         instructions.append({"instruction": prompt, "input": "", "output": answer})
 
+        # ── Step 1 Grounding 학습 예시 (real_web만 — workflow는 불필요) ──
+        if detect_html_type(row) == "real_web":
+            step1_prompt  = build_grounding_step1_prompt(row)
+            step1_desc    = generate_action_desc(row["op"], target_cand, val)
+            step1_answer  = f"<think>\n{reasoning[:80]}\n</think>\n" + json.dumps(
+                {"op": row["op"], "action_desc": step1_desc}
+            )
+            instructions.append({"instruction": step1_prompt, "input": "", "output": step1_answer})
+
         # ── 셔플 augmentation (real_web은 2배 — workflow EM 이미 1.0) ──
-        effective_shuffle = shuffle_n * (2 if detect_html_type(row) == "real_web" else 1)
+        realweb_mult = 2 * max(1, int(realweb_aug_boost))
+        effective_shuffle = shuffle_n * (realweb_mult if detect_html_type(row) == "real_web" else 1)
         for _ in range(effective_shuffle):
-            shuffled = candidates.copy()
-            random.shuffle(shuffled)
+            shuffled = hard_negative_shuffle(candidates, target_id)
             new_choice = None
             for i, c in enumerate(shuffled, 1):
                 if str(c.get("candidate_id", "")) == target_id:
@@ -135,8 +167,11 @@ def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
                 retriever=retriever,
                 k=RETRIEVAL_K,
                 exclude_id=row.get("id"),
+                compact_candidates=compact_prompt,
             )
-            aug_answer = json.dumps({"op": row["op"], "choice": new_choice, "value": val})
+            aug_target_cand = next((c for c in shuffled if str(c.get("candidate_id", "")) == target_id), {})
+            aug_reasoning = generate_cot_reasoning(str(row.get("task", "")), row["op"], new_choice, aug_target_cand, val, candidates=shuffled)
+            aug_answer = f"<think>\n{aug_reasoning}\n</think>\n" + json.dumps({"op": row["op"], "choice": new_choice, "value": val})
             instructions.append({"instruction": aug_prompt, "input": "", "output": aug_answer})
 
     print(f"  총 {len(instructions)}개 생성 (원본+셔플{shuffle_n}회, skip: {skipped}개)")
@@ -147,8 +182,16 @@ def prepare_training_data(df, retriever=None, shuffle_n=SHUFFLE_AUGMENT_N):
 # 검증
 # ─────────────────────────────────────────────
 
-def evaluate_full_pipeline(model, tokenizer, val_df, retriever, train_sites, base_dir,
-                           max_seq_length=MAX_SEQ_LENGTH):
+def evaluate_full_pipeline(
+    model,
+    tokenizer,
+    val_df,
+    retriever,
+    train_sites,
+    base_dir,
+    max_seq_length=MAX_SEQ_LENGTH,
+    compact_prompt: bool = False,
+):
     print("\n🧪 Running held-out evaluation...")
     FastLanguageModel.for_inference(model)
     tokenizer.padding_side  = "left"
@@ -170,12 +213,18 @@ def evaluate_full_pipeline(model, tokenizer, val_df, retriever, train_sites, bas
         except Exception:
             candidates = []
 
-        prompt  = build_prompt(row, candidates, retriever=retriever, k=RETRIEVAL_K,
-                                exclude_id=row.get("id"))
-        text    = f"### Instruction:\n{prompt}\n\n### Response:\n"
+        prompt  = build_prompt(
+            row,
+            candidates,
+            retriever=retriever,
+            k=RETRIEVAL_K,
+            exclude_id=row.get("id"),
+            compact_candidates=compact_prompt,
+        )
+        text    = f"### Instruction:\n{prompt}\n\n### Response:\n<think>\n"
         inputs  = tokenizer([text], return_tensors="pt", padding=True, truncation=True,
                             max_length=max_seq_length).to("cuda")
-        outputs = model.generate(**inputs, max_new_tokens=64, use_cache=True,
+        outputs = model.generate(**inputs, max_new_tokens=512, use_cache=True,
                                  do_sample=False, pad_token_id=tokenizer.eos_token_id)
         generated = outputs[:, inputs["input_ids"].shape[1]:]
         response  = tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
@@ -261,7 +310,7 @@ def evaluate_full_pipeline(model, tokenizer, val_df, retriever, train_sites, bas
 # 학습 메인
 # ─────────────────────────────────────────────
 
-def train():
+def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
     assert torch.cuda.is_available(), (
         "CUDA GPU not available. GPU runtime (Colab T4/L4 or local CUDA) required."
     )
@@ -271,7 +320,7 @@ def train():
 
     max_seq_length = MAX_SEQ_LENGTH
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name    = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
+        model_name    = "unsloth/Qwen3-8B-bnb-4bit",
         max_seq_length = max_seq_length,
         load_in_4bit  = True,
     )
@@ -316,7 +365,13 @@ def train():
               f"{train_df['site_token'].nunique()} sites")
 
     retriever  = ExampleRetriever().build(train_df) if USE_RETRIEVAL else None
-    train_data = prepare_training_data(train_df, retriever=retriever)
+    realweb_boost = 2 if e2_realweb_boost else 1
+    train_data = prepare_training_data(
+        train_df,
+        retriever=retriever,
+        realweb_aug_boost=realweb_boost,
+        compact_prompt=e3_compact_prompt,
+    )
     dataset    = Dataset.from_list(train_data)
 
     def formatting_prompts_func(examples):
@@ -338,13 +393,13 @@ def train():
             padding_free               = False,
             per_device_train_batch_size = 32,
             gradient_accumulation_steps = 1,
-            warmup_ratio               = 0.1,
-            max_steps                  = 2400,
+            warmup_ratio               = 0.05,
+            max_steps                  = 3000,
             learning_rate              = 2e-4,
             fp16                       = not torch.cuda.is_bf16_supported(),
             bf16                       = torch.cuda.is_bf16_supported(),
             logging_steps              = 20,
-            save_steps                 = 500,
+            save_steps                 = 300,
             save_total_limit           = 3,
             optim                      = "adamw_8bit",
             weight_decay               = 0.01,
@@ -354,7 +409,7 @@ def train():
         ),
     )
 
-    print("\nStarting training (2400 steps, choice-based output)...")
+    print("\nStarting training (3000 steps, choice-based output)...")
     trainer.train()
 
     model.save_pretrained(os.path.join(base_dir, "lora_model"))
@@ -363,13 +418,21 @@ def train():
 
     if VALIDATION_MODE and val_df is not None:
         train_sites = set(train_df["site_token"].astype(str))
-        evaluate_full_pipeline(model, tokenizer, val_df, retriever,
-                               train_sites, base_dir, max_seq_length)
+        evaluate_full_pipeline(
+            model,
+            tokenizer,
+            val_df,
+            retriever,
+            train_sites,
+            base_dir,
+            max_seq_length,
+            compact_prompt=e3_compact_prompt,
+        )
     else:
         print("Skipped held-out evaluation (final training mode).")
 
 
-def train_oof():
+def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
     """3-Fold OOF 학습: fold별로 LoRA 학습 → 검증 → 어댑터 저장."""
     assert torch.cuda.is_available(), "CUDA GPU required."
     gpu_name = torch.cuda.get_device_name(0)
@@ -401,7 +464,7 @@ def train_oof():
 
         # 각 fold마다 모델을 새로 로드 (이전 fold 가중치 오염 방지)
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name     = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
+            model_name     = "unsloth/Qwen3-8B-bnb-4bit",
             max_seq_length = max_seq_length,
             load_in_4bit   = True,
         )
@@ -423,7 +486,13 @@ def train_oof():
         )
 
         retriever  = ExampleRetriever().build(train_fold) if USE_RETRIEVAL else None
-        train_data = prepare_training_data(train_fold, retriever=retriever)
+        realweb_boost = 2 if e2_realweb_boost else 1
+        train_data = prepare_training_data(
+            train_fold,
+            retriever=retriever,
+            realweb_aug_boost=realweb_boost,
+            compact_prompt=e3_compact_prompt,
+        )
         dataset    = Dataset.from_list(train_data)
 
         def formatting_prompts_func(examples):
@@ -446,13 +515,13 @@ def train_oof():
                 padding_free               = False,
                 per_device_train_batch_size = 32,
                 gradient_accumulation_steps = 1,
-                warmup_ratio               = 0.1,
-                max_steps                  = 2400,
+                warmup_ratio               = 0.05,
+                max_steps                  = 3000,
                 learning_rate              = 2e-4,
                 fp16                       = not torch.cuda.is_bf16_supported(),
                 bf16                       = torch.cuda.is_bf16_supported(),
                 logging_steps              = 20,
-                save_steps                 = 1000,
+                save_steps                 = 300,
                 save_total_limit           = 2,
                 optim                      = "adamw_8bit",
                 weight_decay               = 0.01,
@@ -462,7 +531,7 @@ def train_oof():
             ),
         )
 
-        print(f"\n  Starting fold {fold} training (2500 steps)...")
+        print(f"\n  Starting fold {fold} training (3000 steps)...")
         trainer.train()
 
         fold_model_dir = os.path.join(base_dir, f"lora_model_fold_{fold}")
@@ -473,8 +542,14 @@ def train_oof():
         # 검증
         train_sites = set(train_fold["site_token"].astype(str))
         metrics = evaluate_full_pipeline(
-            model, tokenizer, val_fold, retriever,
-            train_sites, base_dir, max_seq_length,
+            model,
+            tokenizer,
+            val_fold,
+            retriever,
+            train_sites,
+            base_dir,
+            max_seq_length,
+            compact_prompt=e3_compact_prompt,
         )
         all_oof_metrics.append({"fold": fold, **metrics.get("overall", {})})
 
@@ -505,8 +580,21 @@ def train_oof():
 
 
 if __name__ == "__main__":
-    import sys
-    if "--oof" in sys.argv:
-        train_oof()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--oof", action="store_true", help="Run OOF training mode.")
+    parser.add_argument(
+        "--e2",
+        action="store_true",
+        help="E2: boost real_web augmentation in training data generation.",
+    )
+    parser.add_argument(
+        "--e3",
+        action="store_true",
+        help="E3: use compact candidate formatting in prompts.",
+    )
+    args = parser.parse_args()
+
+    if args.oof:
+        train_oof(e2_realweb_boost=args.e2, e3_compact_prompt=args.e3)
     else:
-        train()
+        train(e2_realweb_boost=args.e2, e3_compact_prompt=args.e3)

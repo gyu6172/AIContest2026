@@ -2,6 +2,7 @@
 import pandas as pd
 import json
 import re
+import random
 from collections import Counter
 from typing import Any
 
@@ -46,10 +47,10 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
     """task 문장에서 TYPE/SELECT에 필요한 value를 추출한다.
 
     우선순위:
-    1. SELECT: options= 중 task에 등장하는 옵션 (exact → fuzzy)
+    1. SELECT: options= 중 task에 등장하는 옵션 (exact → fuzzy, 동적 임계값)
     2. 따옴표 패턴
-    3. TYPE: label/placeholder 기반 뒤따르는 청크
-    4. 날짜 regex
+    3. TYPE: label/placeholder 기반 뒤따르는 청크 → task 말미 청크
+    4. 날짜 regex (date 필드로 확인된 경우에만)
     5. 빈 문자열
     """
     op = str(op or 'CLICK').upper()
@@ -70,11 +71,16 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
             task_words = _token_set(task_lower)
             for opt in options:
                 opt_words = _token_set(opt)
-                score = len(opt_words & task_words) / max(len(opt_words), 1)
+                n_words = len(opt_words)
+                score = len(opt_words & task_words) / max(n_words, 1)
                 if score > best_score:
                     best_score, best_opt = score, opt
-            if best_opt and best_score >= 0.5:
-                return best_opt
+            # 동적 임계값: 단어 1개짜리 옵션은 0.3, 3개 이상은 0.6
+            if best_opt:
+                n = len(_token_set(best_opt))
+                threshold = 0.3 if n <= 1 else (0.6 if n >= 3 else 0.5)
+                if best_score >= threshold:
+                    return best_opt
 
         quoted = re.search(r'["\'"]([^"\']+)["\'"]', task_str)
         if quoted:
@@ -96,9 +102,24 @@ def extract_value_from_task(task: str, op: str, attrs: str) -> str:
                     if value:
                         return value
 
-        date_match = re.search(r'\d{4}-\d{2}-\d{2}', task_str)
-        if date_match:
-            return date_match.group(0)
+        # 날짜 regex: date 타입 필드로 확인된 경우에만 반환 (다중 포맷 지원)
+        _DATE_PATTERNS = [
+            r'\d{4}-\d{2}-\d{2}',                      # YYYY-MM-DD
+            r'\d{1,2}/\d{1,2}/\d{4}',                  # MM/DD/YYYY or M/D/YYYY
+            r'\d{1,2}-\d{1,2}-\d{4}',                  # MM-DD-YYYY
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}',
+        ]
+        attrs_dict = parse_attrs_str(attrs_str)
+        field_type = attrs_dict.get('type', '').lower()
+        field_label_all = ' '.join([
+            attrs_dict.get('label', ''), attrs_dict.get('placeholder', ''),
+            attrs_dict.get('aria-label', ''), attrs_dict.get('name', ''),
+        ]).lower()
+        if 'date' in field_type or 'date' in field_label_all:
+            for _pat in _DATE_PATTERNS:
+                date_match = re.search(_pat, task_str, re.IGNORECASE)
+                if date_match:
+                    return date_match.group(0)
     except Exception:
         return ""
 
@@ -113,10 +134,14 @@ def _candidate_label(c):
     label = str(c.get('text', '')).strip().lower()
     if not label:
         attrs_dict = parse_attrs_str(str(c.get('attrs', '')))
+        # SeeAct empty-text fallback chain
         label = str(
             attrs_dict.get('aria-label', '') or
             attrs_dict.get('placeholder', '') or
-            attrs_dict.get('label', '')
+            attrs_dict.get('title', '') or
+            attrs_dict.get('role', '') or
+            attrs_dict.get('label', '') or
+            attrs_dict.get('name', '')
         ).strip().lower()
     return label
 
@@ -227,37 +252,13 @@ def enforce_consistency(pred, candidates):
         fb = fallback_rule_based({'task': task}, candidates)
         op, target_id, value = fb['op'], str(fb['target_id']), str(fb.get('value', ''))
         CONSISTENCY_DEBUG['invalid_target_repaired'] += 1
+        # fallback 결과도 cand_map에 없으면 첫 번째 후보로 안전하게 대체
+        if target_id not in cand_map and candidates:
+            target_id = str(candidates[0].get('candidate_id', ''))
+            CONSISTENCY_DEBUG['fallback_target_defaulted'] += 1
 
     chosen = cand_map.get(str(target_id))
     tag    = str(chosen.get('tag', '')).lower() if chosen else ''
-
-    if op == 'TYPE' and tag not in {'input', 'textarea'}:
-        replacement = _best_candidate(
-            [c for c in candidates if str(c.get('tag', '')).lower() in {'input', 'textarea'}], task
-        )
-        if replacement:
-            target_id = str(replacement.get('candidate_id', ''))
-            chosen    = replacement
-            tag       = str(chosen.get('tag', '')).lower()
-            value     = extract_value_from_task(task, 'TYPE', str(chosen.get('attrs', ''))) or value
-            CONSISTENCY_DEBUG['type_target_switched'] += 1
-        else:
-            op, value = 'CLICK', ''
-            CONSISTENCY_DEBUG['type_downgraded_click'] += 1
-
-    if op == 'SELECT' and tag != 'select':
-        replacement = _best_candidate(
-            [c for c in candidates if str(c.get('tag', '')).lower() == 'select'], task
-        )
-        if replacement:
-            target_id = str(replacement.get('candidate_id', ''))
-            chosen    = replacement
-            tag       = str(chosen.get('tag', '')).lower()
-            value     = extract_value_from_task(task, 'SELECT', str(chosen.get('attrs', ''))) or value
-            CONSISTENCY_DEBUG['select_target_switched'] += 1
-        else:
-            op, value = 'CLICK', ''
-            CONSISTENCY_DEBUG['select_downgraded_click'] += 1
 
     if op == 'CLICK' and tag == 'select':
         extracted = extract_value_from_task(task, 'SELECT', str(chosen.get('attrs', ''))) if chosen else ''
@@ -277,7 +278,16 @@ def enforce_consistency(pred, candidates):
     if op == 'SELECT':
         options     = _parse_options(str(chosen.get('attrs', ''))) if chosen else []
         fixed_value = _best_option_for_task(options, task, value)
-        if fixed_value != value:
+        if not fixed_value:
+            # options 파싱 실패 시 LLM 원본값 유지, 없으면 task에서 직접 추출
+            fixed_value = value or extract_value_from_task(task, 'SELECT', str(chosen.get('attrs', '')) if chosen else '')
+            if fixed_value:
+                CONSISTENCY_DEBUG['select_value_kept_raw'] += 1
+            elif options:
+                # 모든 방법 실패 시 첫 번째 옵션 사용 (빈 value 방지)
+                fixed_value = options[0]
+                CONSISTENCY_DEBUG['select_value_defaulted_first_option'] += 1
+        elif fixed_value != value:
             CONSISTENCY_DEBUG['select_value_repaired'] += 1
         value = fixed_value
 
@@ -399,27 +409,156 @@ def extract_workflow_context(html_str) -> dict:
 
 
 # ─────────────────────────────────────────────
+# HTML 컨텍스트 추출 (real_web 전용)
+# ─────────────────────────────────────────────
+
+def _find_element_in_soup(soup, candidate):
+    tag   = candidate.get("tag", "") or ""
+    attrs = parse_attrs_str(str(candidate.get("attrs", "")))
+    text  = str(candidate.get("text", "")).strip()
+    for key in ("id", "name", "placeholder", "aria-label"):
+        val = attrs.get(key)
+        if not val:
+            continue
+        el = soup.find(tag, attrs={key: val}) if tag else soup.find(attrs={key: val})
+        if el:
+            return el
+    if text and tag:
+        for el in soup.find_all(tag):
+            if el.get_text(strip=True)[:60] == text[:60]:
+                return el
+    return None
+
+
+def get_html_context(soup, candidate) -> str:
+    if soup is None:
+        return ""
+    try:
+        el = _find_element_in_soup(soup, candidate)
+        if not el:
+            return ""
+        parts = []
+        el_id = el.get("id")
+        if el_id:
+            label = soup.find("label", {"for": el_id})
+            if label:
+                t = label.get_text(strip=True)[:50]
+                if t:
+                    parts.append(f"label:{t}")
+        if not parts:
+            lby = el.get("aria-labelledby")
+            if lby:
+                ref = soup.find(id=lby)
+                if ref:
+                    t = ref.get_text(strip=True)[:50]
+                    if t:
+                        parts.append(f"label:{t}")
+        if not parts:
+            prev = el.find_previous_sibling()
+            if prev:
+                t = prev.get_text(strip=True)[:40]
+                if t:
+                    parts.append(f"prev:{t}")
+        parent = el.parent
+        if parent and parent.name not in ("html", "body", "[document]", None):
+            p_role = parent.get("aria-label") or parent.get("role") or ""
+            p_tag  = parent.name
+            if p_tag in ("form", "fieldset", "section", "nav", "header", "main", "footer"):
+                parts.append(f"in:<{p_tag}{'[' + p_role[:25] + ']' if p_role else ''}>")
+
+        # 자식 요소 (최대 3개 — 버튼 내부 텍스트, select 옵션 등)
+        children = el.find_all(recursive=False)[:3]
+        child_texts = []
+        for ch in children:
+            t = ch.get_text(strip=True)[:25]
+            if t:
+                child_texts.append(f"{ch.name}:{t}")
+        if child_texts:
+            parts.append(f"children:[{', '.join(child_texts)}]")
+
+        # DOM 형제 이웃 (최대 5개) — Dual-View +11.9%p 근사
+        if parent and parent.name not in ("html", "body", "[document]", None):
+            siblings = [s for s in parent.find_all(recursive=False)
+                        if s != el and s.get_text(strip=True)][:5]
+            nei_texts = [f"{s.name}:{s.get_text(strip=True)[:25]}" for s in siblings]
+            if nei_texts:
+                parts.append(f"near:[{', '.join(nei_texts)}]")
+
+        return " | ".join(parts)
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────
 # 번호 기반 후보 포맷 및 변환
 # ─────────────────────────────────────────────
 
-def format_numbered_candidates(candidates) -> str:
+def format_numbered_candidates(candidates, soup=None, compact: bool = False) -> str:
     """후보를 1~N 번호로 포맷팅한다.
 
     LLM이 긴 ID 문자열을 생성하는 대신 숫자(1~15)만 선택하면 됨.
-    hallucination 및 형식 오류 대폭 감소.
+    핵심 attr(type, name, label, placeholder, aria-label, options)을 앞에 노출하고
+    class/data-*/style 등 노이즈 attr은 제거해 모델 구분력을 높인다.
     """
+    # AgentOccam KEEP: id/name/type/role/aria-*/placeholder/value/href/for/required/disabled
+    _KEY_ATTRS = ("id", "name", "type", "role", "aria-label", "aria-labelledby",
+                  "aria-describedby", "aria-expanded", "aria-selected", "aria-checked",
+                  "placeholder", "value", "href", "for",
+                  "required", "disabled", "label", "options")
+    _KEY_ATTRS_COMPACT = ("type", "name", "aria-label", "placeholder", "label", "options", "role")
+    # AgentOccam REMOVE: class/style/data-react*/data-v-*/data-test*/xpath/jsname/jscontroller/tabindex
+    _NOISE_PREFIXES = ("class", "style", "data-react", "data-v-", "data-test",
+                       "xpath", "jsname", "jsaction", "jscontroller", "data-analytics",
+                       "tabindex", "data_", "data-ga", "data-track")
+
     lines = []
     for i, c in enumerate(candidates, 1):
-        tag         = c.get("tag", "")
-        text        = str(c.get("text", "")).strip()
-        attrs       = str(c.get("attrs", "")).strip()
-        attrs_short = (attrs[:120] + "...") if len(attrs) > 120 else attrs
+        tag  = c.get("tag", "")
+        text = str(c.get("text", "")).strip()
+        attrs_dict = parse_attrs_str(str(c.get("attrs", "")))
+
+        # SeeAct empty-text fallback: text 없으면 attrs에서 식별 텍스트 보충
+        if not text:
+            for _fb_key in ("aria-label", "placeholder", "title", "role", "name"):
+                _fb_val = attrs_dict.get(_fb_key, "")
+                if _fb_val:
+                    text = f"[{_fb_key}:{_fb_val[:40]}]"
+                    break
+
+        # 핵심 attr 우선 수집
+        key_parts = []
+        key_list = _KEY_ATTRS_COMPACT if compact else _KEY_ATTRS
+        for k in key_list:
+            v = attrs_dict.get(k, "")
+            if v:
+                key_parts.append(f"{k}={v[:60]}")
+
+        # 핵심 attr에 없는 나머지 중 노이즈 아닌 것 추가 (최대 2개)
+        if not compact:
+            extras = []
+            for k, v in attrs_dict.items():
+                if k in _KEY_ATTRS:
+                    continue
+                if any(k.startswith(p) for p in _NOISE_PREFIXES):
+                    continue
+                extras.append(f"{k}={str(v)[:40]}")
+                if len(extras) >= 2:
+                    break
+            key_parts.extend(extras)
 
         line = f"{i:>2}. [{tag}]"
         if text:
-            line += f' "{text}"'
-        if attrs_short:
-            line += f" | {attrs_short}"
+            line += f' "{text[:60]}"'
+        if key_parts:
+            line += " | " + " | ".join(key_parts)
+
+        # HTML 컨텍스트 (soup가 있을 때만)
+        ctx = ""
+        if not compact and soup is not None:
+            ctx = get_html_context(soup, c)
+        if ctx:
+            line += f"\n    ~ {ctx}"
+
         lines.append(line)
     return "\n".join(lines)
 
@@ -459,24 +598,119 @@ def _candidate_description(c) -> str:
     return desc
 
 
-_embedding_model = None
+_rerank_model = None
 
 
 def rerank_candidates_by_embedding(task: str, candidates: list) -> list:
-    """task 임베딩과의 코사인 유사도로 후보를 내림차순 정렬한다 (real_web 전용)."""
+    """task와 각 후보를 cross-encoder로 공동 인코딩해 내림차순 정렬한다 (real_web 전용)."""
     if not candidates:
         return candidates
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-    from sentence_transformers import util
-    descs     = [_candidate_description(c) for c in candidates]
-    task_emb  = _embedding_model.encode([task], convert_to_tensor=True)
-    cand_embs = _embedding_model.encode(descs,  convert_to_tensor=True)
-    scores    = util.cos_sim(task_emb, cand_embs)[0]
-    ranked    = scores.argsort(descending=True).tolist()
+    global _rerank_model
+    if _rerank_model is None:
+        from sentence_transformers import CrossEncoder
+        _rerank_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    descs  = [_candidate_description(c) for c in candidates]
+    scores = _rerank_model.predict([(task, d) for d in descs])
+    ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
     return [candidates[i] for i in ranked]
+
+
+def hard_negative_shuffle(candidates: list, target_id: str) -> list:
+    """셔플 후 정답과 같은 tag의 후보(hard negative)를 정답 바로 앞에 배치한다.
+
+    같은 tag 후보가 없으면 일반 random.shuffle과 동일하게 동작한다.
+    """
+    shuffled = candidates.copy()
+    random.shuffle(shuffled)
+
+    target_pos = next(
+        (i for i, c in enumerate(shuffled) if str(c.get("candidate_id", "")) == target_id),
+        None,
+    )
+    if target_pos is None:
+        return shuffled
+
+    target_tag = shuffled[target_pos].get("tag", "")
+    hn_pos = next(
+        (i for i, c in enumerate(shuffled)
+         if i != target_pos and c.get("tag", "") == target_tag),
+        None,
+    )
+    # hard negative를 정답 바로 앞으로 swap (정답이 맨 앞이면 뒤로)
+    if hn_pos is not None:
+        swap_to = (target_pos - 1) if target_pos > 0 else (target_pos + 1)
+        if swap_to < len(shuffled):
+            shuffled[hn_pos], shuffled[swap_to] = shuffled[swap_to], shuffled[hn_pos]
+
+    return shuffled
+
+
+def generate_cot_reasoning(task: str, op: str, choice: int, candidate: dict, value: str,
+                           candidates: list = None) -> str:
+    """학습 데이터용: task-aware 추론 문장 생성 (CoT SFT).
+
+    candidates가 주어지면 정답이 아닌 후보를 간략히 언급해 비교 추론을 학습시킨다.
+    전체 출력은 160자 이하 단일 문자열(줄바꿈 없음)로 유지한다.
+    """
+    tag   = candidate.get("tag", "")
+    text  = str(candidate.get("text", "")).strip()
+    attrs = parse_attrs_str(str(candidate.get("attrs", "")))
+    label = (text
+             or attrs.get("aria-label", "")
+             or attrs.get("placeholder", "")
+             or attrs.get("label", "")
+             or attrs.get("name", "")).strip()
+
+    task_short = str(task).strip()[:50]
+    el = f"El.{choice}[{tag}" + (f":{label[:25]}" if label else "") + "]"
+
+    # 비교 대상: 정답과 tag가 다른 후보 최대 2개 (token 절약)
+    contrast = ""
+    if candidates:
+        others = [
+            f"el.{i}[{c.get('tag','')}]"
+            for i, c in enumerate(candidates, 1)
+            if i != choice and str(c.get("tag", "")) != tag
+        ][:2]
+        if others:
+            contrast = f" (not {', '.join(others)})"
+
+    if op == "CLICK":
+        base = f"Need CLICK. {el} matches '{task_short}'.{contrast}"
+    elif op == "TYPE":
+        base = f"Need TYPE '{value[:25]}'. {el} is the right field for '{task_short}'.{contrast}"
+    else:  # SELECT
+        base = f"Need SELECT '{value[:25]}'. {el} has matching option for '{task_short}'.{contrast}"
+
+    return base[:160]
+
+
+# ─────────────────────────────────────────────
+# History 압축 (AgentOccam: 피봇 step만 남김)
+# ─────────────────────────────────────────────
+
+def _compress_history(history_str: str) -> str:
+    """AgentOccam: tag+text+op만 남겨 60-70% 토큰 절약.
+
+    입력: "Step 1: [button] Submit -> CLICK\nStep 2: [input] Email -> TYPE: foo@bar.com"
+    출력: "[button]Submit→CLICK | [input]Email→TYPE:foo@bar.com"
+    """
+    if not history_str or str(history_str).strip() in ("", "None", "nan"):
+        return "None"
+    steps = re.findall(
+        r'Step\s+\d+:\s*\[([^\]]+)\]\s*(.*?)\s*->\s*(\w+)(?::\s*([^\n]*))?',
+        str(history_str)
+    )
+    if not steps:
+        return str(history_str)[:300]
+    compressed = []
+    for tag, text, op, value in steps:
+        text = text.strip()[:30]
+        entry = f"[{tag}]{' ' + text if text else ''}→{op}"
+        if value and op != "CLICK":
+            entry += f":{value.strip()[:20]}"
+        compressed.append(entry)
+    return " | ".join(compressed)
 
 
 # ─────────────────────────────────────────────
@@ -509,16 +743,36 @@ def format_similar_examples(examples, max_task_chars=None, max_history_chars=Non
     return "\n".join(lines)
 
 
-def build_prompt(row, candidates, retriever=None, k=RETRIEVAL_K, exclude_id=None):
+def build_prompt(
+    row,
+    candidates,
+    retriever=None,
+    k=RETRIEVAL_K,
+    exclude_id=None,
+    action_desc: str = "",
+    compact_candidates: bool = False,
+):
     """HTML 타입(workflow / real_web)에 따라 최적화된 프롬프트를 생성한다."""
-    html_type    = detect_html_type(row)
-    n            = len(candidates)
-    numbered     = format_numbered_candidates(candidates)
-    task_str     = str(row.get("task", ""))
-    history_str  = str(row.get("history", "")) or "None"
+    from bs4 import BeautifulSoup
+
+    html_type   = detect_html_type(row)
+    html_str    = str(row.get("cleaned_html", ""))
+    task_str    = str(row.get("task", ""))
+    history_str = _compress_history(str(row.get("history", "")))
+    n           = len(candidates)
+
+    # real_web: HTML 파싱 후 컨텍스트 추출
+    soup = None
+    if html_type == "real_web" and html_str and html_str != "nan":
+        try:
+            soup = BeautifulSoup(html_str, "lxml")
+        except Exception:
+            soup = None
+
+    numbered = format_numbered_candidates(candidates, soup=soup, compact=compact_candidates)
 
     if html_type == "workflow":
-        ctx = extract_workflow_context(str(row.get("cleaned_html", "")))
+        ctx = extract_workflow_context(html_str)
         step_hint = ""
         if ctx["current_step"]:
             step_hint = f"Progress: step {ctx['current_step']} of {ctx['total_steps']}"
@@ -549,22 +803,34 @@ Output ONLY valid JSON:
 {{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "text to type or select, empty string for CLICK"}}"""
 
     else:  # real_web
-        examples_text = ""
-        if retriever:
-            examples = retriever.query(row, k=k, exclude_id=exclude_id)
-            if examples:
-                examples_text = format_similar_examples(
-                    examples[:k],
-                    max_task_chars=RETRIEVAL_TASK_CHARS,
-                    max_history_chars=RETRIEVAL_HISTORY_CHARS,
-                )
-
+        plan_block = f"\n\n[Action Plan]\n{action_desc}" if action_desc else ""
         return f"""You are a web UI automation expert controlling a real website.
 Select the single best action from the numbered candidates below.
-Candidates are ordered by relevance to the task — earlier numbers are more likely correct.
 
 [Candidate Elements] — choose one number (1-{n})
 {numbered}
+
+[Task]
+{task_str}{plan_block}
+
+[History]
+{history_str}
+
+Output ONLY valid JSON:
+{{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "text to type or select, empty string for CLICK"}}"""
+
+
+def build_grounding_step1_prompt(row) -> str:
+    """2단계 Grounding Step 1: 후보 없이 task+history만으로 다음 액션을 자연어 기술.
+
+    출력: {"op": "CLICK|TYPE|SELECT", "action_desc": "어떤 요소에 어떤 동작을 해야 하는지"}
+    """
+    task_str    = str(row.get("task", ""))
+    history_str = _compress_history(str(row.get("history", "")))
+
+    return f"""You are a web UI automation expert.
+Based ONLY on the task and history, describe what action needs to be performed next.
+Do NOT choose a specific element yet — just describe what kind of element and what to do.
 
 [Task]
 {task_str}
@@ -572,7 +838,57 @@ Candidates are ordered by relevance to the task — earlier numbers are more lik
 [History]
 {history_str}
 
-{examples_text}
+Output ONLY valid JSON:
+{{"op": "CLICK|TYPE|SELECT", "action_desc": "brief description of what element to interact with and what to do"}}"""
+
+
+def generate_action_desc(op: str, target_cand: dict, val: str) -> str:
+    """학습 데이터용: 정답 기반으로 Step 1의 action_desc 문장 자동 생성."""
+    tag   = target_cand.get("tag", "element")
+    text  = str(target_cand.get("text", "")).strip()
+    attrs = parse_attrs_str(str(target_cand.get("attrs", "")))
+    label = (text
+             or attrs.get("aria-label", "")
+             or attrs.get("placeholder", "")
+             or attrs.get("label", "")
+             or attrs.get("name", "")).strip()
+    label_part = f" '{label[:40]}'" if label else ""
+    if op == "CLICK":
+        return f"Click the {tag}{label_part}"
+    elif op == "TYPE":
+        return f"Type '{val[:30]}' into the {tag}{label_part} field"
+    else:
+        return f"Select '{val[:30]}' from the {tag}{label_part}"
+
+
+def build_group_prompt(
+    row,
+    group_candidates,
+    soup=None,
+    action_desc: str = "",
+    compact_candidates: bool = False,
+) -> str:
+    """토너먼트용: 5개 이하 후보 중 정답을 고르거나 None(choice=0) 반환.
+
+    action_desc: Step 1 Grounding에서 생성된 자연어 액션 기술 (있으면 주입)
+    """
+    n           = len(group_candidates)
+    numbered    = format_numbered_candidates(group_candidates, soup=soup, compact=compact_candidates)
+    task_str    = str(row.get("task", ""))
+    history_str = _compress_history(str(row.get("history", "")))
+    plan_block  = f"\n[Action Plan]\n{action_desc}" if action_desc else ""
+
+    return f"""You are a web UI automation expert.
+Does ANY of these {n} elements match the task? Choose 1-{n}, or 0 if none match.
+
+[Candidates] — choose one number (1-{n}) or 0 for none:
+{numbered}
+
+[Task]
+{task_str}{plan_block}
+
+[History]
+{history_str}
 
 Output ONLY valid JSON:
-{{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "text to type or select, empty string for CLICK"}}"""
+{{"choice": <1-{n} or 0>, "op": "CLICK|TYPE|SELECT", "value": "text to type or select, empty string for CLICK"}}"""
