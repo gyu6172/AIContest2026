@@ -714,8 +714,144 @@ def _compress_history(history_str: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# LCA (Lowest Common Ancestor) 분석 (DPO용)
+# ─────────────────────────────────────────────
+
+def get_dom_distance(soup, el1, el2) -> int:
+    """두 BeautifulSoup 요소 간의 DOM 트리 거리를 계산한다.
+    거리 = depth(el1) + depth(el2) - 2 * depth(LCA(el1, el2))
+    """
+    if not el1 or not el2:
+        return 999  # 거리를 측정할 수 없는 경우
+    if el1 == el2:
+        return 0
+
+    # 각 요소의 조상 노드 리스트 (root 방향)
+    path1 = [el1] + list(el1.parents)
+    path2 = [el2] + list(el2.parents)
+
+    # Root부터 내려오면서 공통 조상이 끝나는 지점 찾기
+    path1.reverse()
+    path2.reverse()
+
+    common_depth = 0
+    for n1, n2 in zip(path1, path2):
+        if n1 == n2:
+            common_depth += 1
+        else:
+            break
+
+    return (len(path1) + len(path2)) - (2 * common_depth)
+
+
+def _is_false_negative(cand, target_cand):
+    """정답(target_cand)과 지나치게 유사한 후보인지 판별한다. (False Negative 필터)"""
+    if not cand or not target_cand:
+        return True
+    if str(cand.get("candidate_id")) == str(target_cand.get("candidate_id")):
+        return True
+
+    t1 = str(cand.get("text", "")).strip().lower()
+    t2 = str(target_cand.get("text", "")).strip().lower()
+
+    # 1. 강한 제외 조건: text가 비어있지 않고 완전히 동일
+    if t1 and t1 == t2:
+        return True
+
+    a1 = parse_attrs_str(str(cand.get("attrs", "")))
+    a2 = parse_attrs_str(str(target_cand.get("attrs", "")))
+
+    # 2. 강한 제외 조건: label, aria-label 중 하나라도 비어있지 않고 완전히 동일
+    for key in ["label", "aria-label"]:
+        v1 = str(a1.get(key, "")).strip().lower()
+        v2 = str(a2.get(key, "")).strip().lower()
+        if v1 and v1 == v2:
+            return True
+
+    # 3. 약한 유사성 조건: name, placeholder 일치 여부 확인
+    weak_matches = 0
+    for key in ["name", "placeholder"]:
+        v1 = str(a1.get(key, "")).strip().lower()
+        v2 = str(a2.get(key, "")).strip().lower()
+        if v1 and v1 == v2:
+            weak_matches += 1
+
+    # 4. 약한 조건이 2개 이상 일치하면 제외
+    if weak_matches >= 2:
+        return True
+
+    return False
+
+
+def find_lca_hard_negative(row, candidates, target_id):
+    """15개 후보 중 정답(target_id)과 DOM 트리상에서 가장 가까운 오답 요소를 반환한다.
+
+    WEPO 프레임워크 핵심: DOM 거리(LCA)가 가까운 요소가 가장 '매력적인 오답'임.
+    개선: 정교한 False-negative filter 및 Hybrid Scoring(LCA + Task Match 정규화) 적용.
+    """
+    from bs4 import BeautifulSoup
+
+    # 1. 정답 요소 찾기 및 기본 필터링 세팅
+    target_cand = next((c for c in candidates if str(c.get("candidate_id", "")) == target_id), None)
+    
+    others = [c for c in candidates if str(c.get("candidate_id", "")) != target_id]
+    
+    if not target_cand:
+        return random.choice(others) if others else None
+
+    # 필터 적용된 오답 후보군 (안전을 위해 모두 필터링되면 전체 오답 풀로 Fallback)
+    filtered_others = [c for c in others if not _is_false_negative(c, target_cand)]
+    if not filtered_others:
+        filtered_others = others
+
+    html_str = str(row.get("cleaned_html", ""))
+    if not html_str or html_str == "nan":
+        return random.choice(filtered_others)
+
+    try:
+        soup = BeautifulSoup(html_str, "lxml")
+    except Exception:
+        return random.choice(filtered_others)
+
+    target_el = _find_element_in_soup(soup, target_cand)
+    if not target_el:
+        return random.choice(filtered_others)
+
+    # 2. 하이브리드 스코어링
+    best_neg = None
+    max_score = -999.0
+    task = str(row.get("task", ""))
+
+    for c in filtered_others:
+        c_el = _find_element_in_soup(soup, c)
+        if not c_el:
+            dist_score = 0.0
+        else:
+            dist = get_dom_distance(soup, target_el, c_el)
+            # DOM 거리 점수 정규화 (최대 거리를 대략 20으로 보고 0~1.0 스케일링)
+            dist_score = max(0, 20 - dist) / 20.0
+
+        # 태스크 일치도 점수 정규화 (최대 3점을 기준으로 0~1.0 스케일링)
+        match_score = min(_candidate_match_score(c, task), 3.0) / 3.0
+        
+        # 태그 보너스 (편향 방지를 위해 0.1만 부여)
+        tag_bonus = 0.1 if c.get("tag") == target_cand.get("tag") else 0.0
+
+        current_score = dist_score + match_score + tag_bonus
+
+        if current_score > max_score:
+            max_score = current_score
+            best_neg = c
+
+    # 3. 적절한 오답을 못 찾았을 경우 대비
+    if not best_neg:
+        return random.choice(filtered_others)
+
+    return best_neg
+
+
+# ─────────────────────────────────────────────
 # RAG 포맷팅 & 프롬프트 빌더
-# (train.py / inference.py 공용 — 이 파일만 수정하면 됨)
 # ─────────────────────────────────────────────
 RETRIEVAL_K             = 3
 RETRIEVAL_TASK_CHARS    = 150

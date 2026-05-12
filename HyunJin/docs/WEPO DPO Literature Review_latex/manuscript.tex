@@ -1,0 +1,305 @@
+\documentclass[pdflatex,sn-mathphys-num]{sn-jnl}
+
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{mathrsfs}
+\usepackage[title]{appendix}
+\usepackage{xcolor}
+\usepackage{textcomp}
+\usepackage{manyfoot}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+\theoremstyle{thmstyleone}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+
+\theoremstyle{thmstyletwo}
+\newtheorem{example}{Example}
+\newtheorem{remark}{Remark}
+
+\theoremstyle{thmstylethree}
+\newtheorem{definition}{Definition}
+
+\raggedbottom
+\usepackage{amsmath}
+
+\begin{document}
+\title[WEPO DPO Literature Review]{WEPO DPO Literature Review}
+\author*[1]{\fnm{Anonymous} \sur{Author}}\email{anonymous@email.com}
+\affil*[1]{\orgdiv{Research Group}, \orgname{Anonymous Institution}, \orgaddress{\street{Anonymous Street}, \city{Anonymous City}, \postcode{00000}, \state{Anonymous State}, \country{Country}}}
+
+\abstract{This is a comprehensive, ranked literature review for WEPO-style DPO applied to web UI action prediction, with a detailed critical evaluation of LCA/DOM-distance hard negative strategies versus alternatives.}
+
+\keywords{DPO, Web Agent, Preference Optimization, Hard Negative Mining, DOM}
+
+\maketitle
+
+This is a comprehensive, ranked literature review for WEPO-style DPO applied to web UI action prediction, with a detailed critical evaluation of LCA/DOM-distance hard negative strategies versus alternatives.
+
+\section{Ranked Paper List --- Most to Least Directly Useful}
+
+\section{Tier 1: Direct Methodological Foundation}
+
+\textbf{1. WEPO: Web Element Preference Optimization for LLM-based Web Navigation} \\
+Liu, Jia, Zhang, Hu --- AAAI 2025 | \href{https://arxiv.org/abs/2412.10742}{arxiv.org/abs/2412.10742}
+
+\begin{itemize}
+    \item \textbf{Relevance:} This is the direct target method. Applies DPO to web navigation using HTML element distance-based negative sampling --- selecting non-salient elements as rejected responses. Achieves +13.8\% over WebAgent and +5.3\% over CogAgent on Mind2Web. Critically, the paper uses an "unsupervised" negative construction: elements that are structurally distant or semantically non-salient serve as rejected candidates, avoiding the need for human preference labels.
+    \item \textbf{Supports:} \checkmark DPO/preference optimization \checkmark Hard negative mining \checkmark DOM/tree-aware grounding \checkmark Web agent action prediction
+    \item \textbf{Key method:} For each training step, the gold action is the chosen response. Non-salient elements (those farther in structural distance from the gold element, or lacking relevant semantic attributes) form the rejected response. The DPO objective then pushes the model to prefer the correct element without any external reward model.
+    \item \textbf{How to adapt:} Your implementation exactly mirrors WEPO. For your setup with 15 candidates, construct the rejected pair by substituting the gold candidate index with the candidate having the smallest LCA-based DOM distance (but $\neq$ gold). Keep op and value identical in the rejected response JSON so the gradient targets only the choice field. Consider also testing value-mutated negatives as a secondary signal.
+    \item \textbf{Limitations:} Paper does not ablate different distance metrics (LCA vs. semantic vs. visual). The "distance" definition is implicit and may vary across DOM structures. No analysis of false-negative risk (DOM-close elements that could also be valid targets).
+\end{itemize}
+
+\textbf{2. Direct Preference Optimization: Your Language Model is Secretly a Reward Model} \\
+Rafailov, Sharma, Mitchell, Ermon, Manning --- NeurIPS 2023 | \href{https://arxiv.org/abs/2305.18290}{arxiv.org/abs/2305.18290}
+
+\begin{itemize}
+    \item \textbf{Relevance:} The foundational algorithm underlying WEPO. Derives the closed-form optimal policy from RLHF, bypassing reward modeling. For your task, the DPO loss on (prompt, chosen\_json, rejected\_json) triples directly increases the log-likelihood gap between the correct element choice and the confused one.
+    \item \textbf{Supports:} \checkmark DPO/preference optimization \checkmark Web agent action prediction (downstream)
+    \item \textbf{Key method:} Reformulates RLHF as a classification problem over preference pairs. Stable, reference-model-based, with no on-policy sampling required. The implicit reward is $r(x,y) = \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}$.
+    \item \textbf{How to adapt:} Use TRL's \texttt{DPOTrainer} with your SFT-trained Qwen3 as reference model. Set $\beta=0.1$--0.2 (lower $\beta$ = more conservative updates, safer for structured JSON output). Key risk: DPO is known to cause likelihood displacement on the chosen response if not carefully regularized; monitor chosen log-probability during training.
+    \item \textbf{Limitations:} Assumes pairwise preferences are sufficient; can suffer from length bias, mode collapse, and likelihood displacement. For structured JSON outputs, these instabilities may corrupt the format of both chosen and rejected sequences.
+\end{itemize}
+
+\textbf{3. Mind2Web: Towards a Generalist Agent for the Web} \\
+Deng, Gu, Zheng, Chen, Stevens et al. --- NeurIPS 2023 | \href{https://arxiv.org/abs/2306.06070}{arxiv.org/abs/2306.06070}
+
+\begin{itemize}
+    \item \textbf{Relevance:} The primary benchmark for your evaluation and the source of the two-stage pipeline (small cross-encoder candidate ranker $\rightarrow$ generative LLM action predictor). The candidate filtering approach --- ranking all DOM elements with DeBERTa, then passing top-K to the LLM --- defines the candidate\_elements setup you already use. Negative elements in your pool are exactly the distractor elements from Mind2Web's second-stage setup.
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Web agent action prediction \checkmark Hard negative mining (implicit, via top-K filtering)
+    \item \textbf{Key method:} Two-stage: (1) DeBERTa-based cross-encoder scores each DOM element against (task, history), selects top-K candidates; (2) Flan-T5 receives top-K candidates in a multiple-choice format and generates the action. Hard negatives arise naturally as the non-selected top-K candidates that the cross-encoder could not separate from the gold element.
+    \item \textbf{How to adapt:} The Mind2Web candidate set is your DPO training signal: for each step, the top-K candidates that scored below the gold but above random elements are your hardest negatives. Rather than random or nearest-DOM sampling, use the ranker's confusion candidates (those that ranked 2nd or 3rd) as rejected pairs.
+    \item \textbf{Limitations:} Uses offline cached websites; performance on live web degrades. The cross-encoder ranker adds significant latency and its recall@10 is not perfect ($\sim$90\%), meaning the gold element occasionally falls outside the candidate window.
+\end{itemize}
+
+\textbf{4. WebLINX: Real-World Website Navigation with Multi-Turn Dialogue} \\
+Lù, Kasner, Reddy --- ICML 2024 | \href{https://arxiv.org/abs/2402.05930}{arxiv.org/abs/2402.05930}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Introduces Dense Markup Ranking (DMR) --- a dual-encoder retrieval model that efficiently ranks DOM elements by cosine similarity between a query (task + history) and each element's HTML representation. DMR is a faster alternative to DeBERTa cross-encoders. Critically, DMR provides a principled ranking signal that directly identifies the hardest-to-distinguish negative candidates: those that score just below the gold element on the cosine similarity scale, which is a fundamentally semantic negative criterion, not a DOM-distance criterion.
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Hard negative mining (semantic similarity-based ranking) \checkmark Web agent action prediction
+    \item \textbf{Key method:} Finetunes MiniLM (33M) as a dual encoder using cosine MSE loss between the state representation and each candidate's HTML text. Top-K candidates from DMR are passed to the action predictor. The paper shows recall@10 $\approx$ 93\% with DMR, 5$\times$ faster than the DeBERTa cross-encoder.
+    \item \textbf{How to adapt:} Use DMR rankings as a semantic hard-negative oracle: the element ranked 2nd by DMR (i.e., closest in semantic embedding space to the query but incorrect) is a semantically hard negative that complements your LCA-based structural negative. A hybrid strategy: use LCA for positional/structural negatives and DMR rank-2 for semantic negatives.
+    \item \textbf{Limitations:} DMR is trained without explicit hard negative supervision --- it uses random in-DOM negatives, so the learned ranking reflects HTML text similarity, not necessarily task-level relevance. The cosine MSE loss is weaker than cross-entropy ranking for fine-grained discrimination.
+\end{itemize}
+
+\section{Tier 2: Critical Preference Optimization Variants}
+
+\textbf{5. KTO: Model Alignment as Prospect Theoretic Optimization} \\
+Ethayarajh, Xu, Muennighoff, Jurafsky, Kiela --- ICML 2024 | \href{https://arxiv.org/abs/2402.01306}{arxiv.org/abs/2402.01306}
+
+\begin{itemize}
+    \item \textbf{Relevance:} KTO replaces pairwise (chosen, rejected) preference data with unpaired desirability signals: each sample is independently labeled as desirable (correct element) or undesirable (wrong element). This is directly applicable to your task where you have 1 correct and up to 14 incorrect candidates --- you can train KTO on all 15 candidates as individual desirability labels without constructing pairs. Matches or exceeds DPO at 1B--30B scale.
+    \item \textbf{Supports:} \checkmark DPO/preference optimization (alternative) \checkmark Hard negative mining (implicit, all candidates used) \checkmark Web agent action prediction
+    \item \textbf{Key method:} Uses prospect theory: gains from desirable outputs and losses from undesirable ones are weighted asymmetrically (humans are more loss-averse). Loss: $\mathcal{L}_\text{KTO} = \mathbb{E}\left[w(x,y)\left(1 - \sigma\left(\beta r_\theta(x,y) - z_{\text{ref}}\right)\right)\right]$ where $w$ differentiates desirable vs. undesirable samples. No reference pair needed.
+    \item \textbf{How to adapt:} Label each of your 15 candidates per step: gold = desirable, all others = undesirable. No need to select which negative to use --- all 14 non-gold candidates contribute gradient signal. This eliminates the hard-negative selection problem entirely and uses more data per step than pairwise DPO.
+    \item \textbf{Limitations:} KTO requires careful tuning of the desirable/undesirable ratio (recommended 1:1 to 1:2). With 1 desirable and 14 undesirable per step, you may need to oversample or weight the desirable side heavily. Performance may saturate faster if undesirable gradient overwhelms the desirable signal.
+\end{itemize}
+
+\textbf{6. ORPO: Monolithic Preference Optimization without Reference Model} \\
+Hong, Lee, Thorne --- ACL 2024 | \href{https://arxiv.org/abs/2403.07691}{arxiv.org/abs/2403.07691}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Eliminates the need for a separate reference model by adding an odds-ratio penalty directly to the SFT cross-entropy loss. Combines SFT and preference optimization in one stage. Critical advantage: no risk of likelihood displacement on chosen responses, since the SFT loss continuously pushes the model toward chosen responses while the odds-ratio term penalizes rejected ones.
+    \item \textbf{Supports:} \checkmark DPO/preference optimization (reference-free) \checkmark Hard negative mining \checkmark Web agent action prediction
+    \item \textbf{Key method:} Loss = SFT\_CE\_loss + $\lambda$ $\times$ log\_odds\_ratio\_penalty. The penalty contrasts the odds of generating chosen vs. rejected: $\mathcal{L}_\text{OR} = -\log \sigma\left(\log \frac{P(y_w|x)}{1-P(y_w|x)} - \log \frac{P(y_l|x)}{1-P(y_l|x)}\right)$.
+    \item \textbf{How to adapt:} Replace your SFT + DPO two-stage training with a single ORPO training run. For your JSON output task, this avoids the common DPO instability where format quality on the chosen response degrades during preference training. The SFT component keeps the JSON structure well-formed while the odds-ratio component reduces choice confusion.
+    \item \textbf{Limitations:} No reference model means less control over KL regularization. ORPO can overfit to the specific chosen responses in the training set more aggressively than DPO with $\beta$-regularization. Requires careful $\lambda$ tuning.
+\end{itemize}
+
+\section{Tier 3: DOM/Structure-Aware Grounding}
+
+\textbf{7. Dual-View Visual Contextualization for Web Navigation} \\
+Kil, Song, Zheng, Deng, Su --- CVPR 2024 | \href{https://ieeexplore.ieee.org/document/10656291/}{doi.org/10.1109/CVPR52733.2024.01648}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Contains a critical empirical finding directly relevant to your LCA debate: The paper explicitly tests DOM tree neighbors versus visual/spatial neighbors as context for element ranking. Result: DOM-tree neighbors perform significantly worse than visual-spatial neighbors on Mind2Web. Table 12 in the paper shows HTMLTREENEI\_PRED (DOM-tree-based context) is substantially below DUAL-VCR\_PRED (visual-spatial neighbors), with the conclusion: "Our neighbors defined by a screenshot (DUAL-VCR\_PRED) notably outperform the neighbors defined by an HTML tree." This is direct empirical evidence that DOM/tree distance is a weaker proximity signal than visual/spatial distance.
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Hard negative mining (visual proximity as better alternative) \checkmark Web agent action prediction
+    \item \textbf{Key method:} Encodes each element with its M=5 spatially closest visual neighbors (from bounding box Euclidean distance), combining visual features from Pix2Struct ViT with HTML text features. The spatial context from screenshots better captures semantic relationships than DOM hierarchy because web developers arrange functionally related elements visually close together, not necessarily as DOM siblings or parent-child pairs.
+    \item \textbf{How to adapt:} If you have access to bounding boxes (from browser rendering), use Euclidean spatial distance as a hard negative criterion alongside or instead of LCA depth. Select the candidate element spatially closest to the gold element (by bounding box centroid distance) as the rejected pair. This is a stronger and more semantically meaningful hard negative than LCA distance.
+    \item \textbf{Limitations:} Requires bounding box information from browser rendering, which adds a preprocessing step. For text-only pipelines (cleaned HTML without rendering), spatial distance is unavailable. In that case, DOM distance remains the best structural proxy.
+\end{itemize}
+
+\textbf{8. DOM-Q-NET: Grounded RL on Structured Language} \\
+Jia, Kiros, Ba --- NeurIPS Workshop 2019 | \href{https://arxiv.org/abs/1902.07257}{arxiv.org/abs/1902.07257}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Foundational paper for DOM-aware element representation using Graph Neural Networks. Explicitly models the HTML tree structure with a GNN, creating element representations that incorporate parent, sibling, and child relationships. The GNN's message passing implicitly defines a tree-distance-weighted neighborhood --- elements that share many ancestors get similar representations.
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Web agent action prediction
+    \item \textbf{Key method:} Graph neural network over the DOM tree; each node (element) aggregates representations from its parent, siblings, and children. Separate Q-functions for click actions (which element) and type actions (which element + what value). Tested on MiniWoB++ with RL training.
+    \item \textbf{How to adapt:} GNN-learned representations provide an alternative negative distance metric: elements with high representation cosine similarity in the GNN embedding space are structurally and contextually similar, making them better negatives than raw LCA depth. Pre-train a small GNN on your training HTML pages; use GNN embedding distance as a negative selection criterion.
+    \item \textbf{Limitations:} GNN training requires the full DOM graph, which is expensive for large real-world pages. MiniWoB++ DOMs are much simpler than Mind2Web or WebArena pages. Not directly tested with modern transformer-based web agents.
+\end{itemize}
+
+\textbf{9. Mapping Natural Language Commands to Web Elements} \\
+Pasupat, Jiang, Liu, Guu, Liang --- EMNLP 2018 | \href{https://aclanthology.org/D18-1540}{aclanthology.org/D18-1540}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Foundational paper for element grounding. Introduces the task of mapping NL commands to web elements using textual, structural, and spatial properties. The paper explicitly analyzes functional references ("find who made this site"), relational reasoning ("article by John"), and visual reasoning ("top-most article") --- all cases where DOM distance is a poor negative criterion because the correct and incorrect elements may be structurally close but semantically very different (e.g., two articles in a list differ by content, not DOM position).
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Hard negative mining (structural vs semantic analysis)
+    \item \textbf{Key method:} Features from tag type, DOM path, textual content, and visual position. Shows that no single feature type dominates --- different phenomena require different signals. This insight motivates hybrid negative strategies.
+    \item \textbf{How to adapt:} Categorize your training data by the type of grounding challenge (functional, relational, visual). Apply DOM-distance negatives for functional reference cases (where nearby elements have similar tags), and semantic negatives for relational/visual cases (where elements differ in content, not structure).
+    \item \textbf{Limitations:} Pre-LLM era; uses manual feature engineering. The dataset (WebSRC) is smaller and simpler than Mind2Web. The core insight about multi-type grounding challenges remains valid and important.
+\end{itemize}
+
+\textbf{10. The Impact of Element Ordering on LM Agent Performance} \\
+Chi, Talwalkar, Donahue --- 2024 | \href{https://arxiv.org/abs/2409.12089}{arxiv.org/abs/2409.12089}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Directly addresses your "numbered choice 1..N" formulation. Shows that the ordering in which candidates are presented to the LLM is as important as the candidates themselves --- randomizing element order degrades performance comparably to removing all visible text. This has critical implications for your DPO training: if your rejected candidate is always in a specific position (e.g., always adjacent to the gold in the numbered list), the model may learn a positional bias rather than a semantic discrimination signal.
+    \item \textbf{Supports:} \checkmark Hard negative mining (ordering bias) \checkmark Web agent action prediction \checkmark DOM/tree-aware grounding
+    \item \textbf{Key method:} Ablates different element orderings (DOM order, spatial order, random) and shows that DOM order is generally best. Proposes dimensionality reduction-based ordering for pixel-only environments. Key finding: as task complexity increases and models improve, ordering effects become more pronounced.
+    \item \textbf{How to adapt:} In your DPO training data, shuffle the position of the rejected candidate relative to the chosen one across different training examples. This prevents the model from learning "avoid choice N-1" (the position of the LCA-close negative) instead of learning the semantic distinction. Your existing candidate-order augmentation partially addresses this but may need to include position-balanced negative placement.
+    \item \textbf{Limitations:} Tested primarily on OmniACT; does not directly test DPO training scenarios. The ordering effect on DPO gradient dynamics requires separate empirical validation on your dataset.
+\end{itemize}
+
+\section{Tier 4: Hard Negative Mining Theory and Practice}
+
+\textbf{11. ANCE: Approximate Nearest Neighbor Negative Contrastive Estimation} \\
+Xiong, Xiong, Li et al. --- ICLR 2021 | \href{https://openreview.net/forum?id=zeFrfgyZln}{openreview.net/forum?id=zeFrfgyZln}
+
+\begin{itemize}
+    \item \textbf{Relevance:} The most influential paper on dynamic hard negative mining for dense retrieval. Demonstrates theoretically and empirically that static hard negatives (fixed at data construction time, e.g., LCA-distance-based) diverge from the actual negatives seen during inference as the model evolves. ANCE proposes asynchronous ANN indexing to keep negatives aligned with the current model state. The core insight: static DOM-distance negatives are a proxy for model-difficulty negatives, and the proxy quality degrades as training progresses.
+    \item \textbf{Supports:} \checkmark Hard negative mining \checkmark DPO/preference optimization (data quality)
+    \item \textbf{Key method:} Maintains a Faiss ANN index of document/element encodings from the current model. Refreshes the index asynchronously every K training steps. Training negatives are the current model's top-K retrieved but incorrect elements --- these are the hardest negatives under the current representation, not under a static DOM-distance heuristic.
+    \item \textbf{How to adapt:} For your web element DPO, after each SFT epoch, run your model on the candidate set and select rejected candidates as those the current model assigns highest probability to (excluding the gold). This is model-difficulty-based mining rather than DOM-distance mining. Implemented as: (1) run inference on all training samples, (2) rank non-gold candidates by model confidence, (3) select the top-1 as the new rejected candidate for the next DPO epoch. Repeat every 500--1000 training steps.
+    \item \textbf{Limitations:} Requires repeated inference passes over the training set, adding 2--3$\times$ training compute. For small training sets (<50K samples), the overhead is manageable. The asynchronous update introduces a lag between model state and negative quality.
+\end{itemize}
+
+\textbf{12. Hard Negatives or False Negatives?} \\
+Cai, Guo, Fan, Ai, Zhang --- CIKM 2022 | \href{https://dl.acm.org/doi/10.1145/3511808.3557343}{doi.org/10.1145/3511808.3557343}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Directly addresses the critical theoretical risk in your LCA-based negative strategy: DOM-close elements are likely candidates for valid alternative actions (i.e., false negatives). The paper shows that hard negatives from stronger retrievers contain more false negatives, which can hurt training. For your web UI task, a DOM-close element (same parent, adjacent sibling) may legitimately accomplish the task in an alternative way --- training the model to avoid it introduces incorrect supervision.
+    \item \textbf{Supports:} \checkmark Hard negative mining (theoretical risk analysis)
+    \item \textbf{Key method:} Proposes Coupled Estimation Technique (CET) that simultaneously learns a relevance model and a selection model to correct pooling bias. Identifies that hard negatives from stronger retrievers have higher false negative rates due to annotation pooling bias.
+    \item \textbf{How to adapt:} Add a false-negative filter to your LCA-based negative selection: before adding a DOM-close element as a rejected candidate, verify it is semantically distinct from the gold (e.g., different text content, different ARIA label, different tag). Elements with near-identical text to the gold but different position (e.g., two "Add to Cart" buttons) should NOT be treated as negatives --- they are ambiguous and may both be valid targets.
+    \item \textbf{Limitations:} The CET approach requires joint training of multiple models. A simpler heuristic filter (described above) achieves similar protection at lower cost.
+\end{itemize}
+
+\textbf{13. NV-Retriever: Effective Hard Negative Mining with Positive-Aware Methods} \\
+Moreira, Osmulski, Xu, Ak, Schifferer --- arXiv 2024 | \href{https://arxiv.org/abs/2407.15831}{arxiv.org/abs/2407.15831}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Introduces positive-aware mining: use the relevance score of the positive (gold) example as an anchor for filtering false negatives. Specifically, reject any negative whose similarity score exceeds a threshold relative to the positive score. This is directly applicable to your DOM-distance negative strategy: if the LCA-close negative has a higher semantic similarity to the task query than expected, it might be a false negative and should be excluded.
+    \item \textbf{Supports:} \checkmark Hard negative mining (false negative removal) \checkmark DPO/preference optimization (data quality)
+    \item \textbf{Key method:} Positive-aware false negative removal: mine negatives using a teacher model, then filter out any negative whose teacher relevance score exceeds $\tau$ $\times$ score(positive). Achieves state-of-the-art on MTEB Retrieval (BEIR) benchmark.
+    \item \textbf{How to adapt:} Use your DMR ranker or a semantic similarity model as a teacher. For each proposed LCA-based rejected candidate, compute its semantic similarity to the query (task + history). If similarity > $\tau$ $\times$ similarity(gold), exclude it from the rejected set and use the next-closest DOM element. Set $\tau$ empirically on a small validation set.
+    \item \textbf{Limitations:} Requires a teacher model at data construction time, adding preprocessing overhead. $\tau$ needs tuning per dataset domain.
+\end{itemize}
+
+\textbf{14. Optimizing Dense Retrieval Training with Hard Negatives (STAR/ADORE)} \\
+Zhan, Mao, Liu, Guo, Zhang --- SIGIR 2021 | \href{https://dl.acm.org/doi/10.1145/3404835.3462880}{doi.org/10.1145/3404835.3462880}
+
+\begin{itemize}
+    \item \textbf{Relevance:} Introduces the critical finding that static hard negatives are risky: they can lead to training instability because the negatives are fixed while the model changes. Proposes STAR (mixed static + random negatives for stability) and ADORE (dynamic negatives updated during training). For your DPO pipeline, this translates to: mixing LCA-distance negatives (static) with model-confidence negatives (dynamic) in a ratio that provides both stability and informativeness.
+    \item \textbf{Supports:} \checkmark Hard negative mining \checkmark DPO/preference optimization (training stability)
+    \item \textbf{Key method:} STAR: 50\% BM25 hard + 50\% random negatives to prevent early collapse. ADORE: dynamic negatives from a separately maintained ANN index. Together they define the stability-vs-informativeness trade-off space.
+    \item \textbf{How to adapt:} Implement a mixed negative strategy: in each DPO batch, 50\% of rejected candidates come from LCA-distance selection (static, stable) and 50\% from the current model's top-confused candidates (dynamic, informative). Start with a higher static ratio (70/30) in early training and shift toward more dynamic negatives (30/70) in later epochs.
+    \item \textbf{Limitations:} The optimal mixing ratio is task-dependent. For web element selection with only 15 candidates, the dynamic negative pool is small and may rapidly exhaust informative negatives.
+\end{itemize}
+
+\section{Tier 5: Benchmark and Evaluation Context}
+
+\textbf{15. WebArena: A Realistic Web Environment for Building Autonomous Agents} \\
+Zhou, Xu, Zhu et al. --- ICLR 2024 | \href{https://arxiv.org/abs/2307.13854}{arxiv.org/abs/2307.13854}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark Web agent action prediction
+    \item \textbf{Relevance to WEPO-DPO:} WebArena's end-to-end task success metric penalizes any wrong element choice severely --- a single wrong click can cascade into task failure. This justifies the exact-match-style DPO training where the rejected element is a DOM-close alternative that would cause task-level failure even if structurally similar.
+    \item \textbf{Adaptation:} Use WebArena failure traces as a source of hard negatives: when the agent clicks a wrong element and fails, the wrong element is a natural model-generated hard negative for DPO training (online negative mining).
+\end{itemize}
+
+\textbf{16. GPT-4V(ision) is a Generalist Web Agent, if Grounded (SeeAct)} \\
+Zheng, Gou, Kil, Sun, Su --- ICML 2024 | \href{https://arxiv.org/abs/2401.01614}{arxiv.org/abs/2401.01614}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Web agent action prediction
+    \item \textbf{Relevance to WEPO-DPO:} SeeAct's analysis of grounding strategies is directly relevant: it shows that set-of-mark prompting (numbered elements, same as your 1..15 choice formulation) is suboptimal compared to strategies that leverage both HTML structure and visuals. Crucially, the paper identifies grounding as the main bottleneck. DPO training specifically targeting element selection (your approach) is well-motivated by this analysis.
+    \item \textbf{Adaptation:} SeeAct's oracle grounding experiments reveal the upper bound of what DPO can achieve --- if oracle grounding gets 51.1\% success, DPO-improved grounding at 80--90\% recall@15 could realistically close a significant portion of the gap.
+\end{itemize}
+
+\textbf{17. AgentOccam: A Simple Yet Strong Baseline for LLM-Based Web Agents} \\
+Yang, Liu, Chaudhary et al. --- arXiv 2024 | \href{https://arxiv.org/abs/2410.13825}{arxiv.org/abs/2410.13825}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark Web agent action prediction \checkmark DOM/tree-aware grounding
+    \item \textbf{Relevance to WEPO-DPO:} AgentOccam (+29.4\% on WebArena via observation/action space alignment) demonstrates that how you present the DOM to the LLM matters more than model size. This motivates careful design of your candidate representation format before applying DPO --- DPO on a poorly formatted prompt will learn to navigate formatting noise rather than semantic element distinctions.
+    \item \textbf{Adaptation:} Before DPO training, run AgentOccam-style ablations on your candidate representation format (HTML tag inclusion, attribute inclusion, bounding box inclusion). Use the best representation consistently across both chosen and rejected pairs in DPO data.
+\end{itemize}
+
+\textbf{18. Multimodal Web Navigation with Instruction-Finetuned Foundation Models (WebGUM)} \\
+Furuta, Lee, Nachum et al. --- ICLR 2024 | \href{https://arxiv.org/abs/2305.11854}{arxiv.org/abs/2305.11854}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark Web agent action prediction \checkmark DOM/tree-aware grounding
+    \item \textbf{Relevance to WEPO-DPO:} WebGUM's joint finetuning of LLM + vision encoder on HTML + screenshot data shows that demonstration data diversity is critical. For your DPO pipeline, this suggests that training on only workflow-type pages introduces distribution shift when applied to real web. WebGUM's 347K demonstrations can serve as additional SFT pre-training data before DPO fine-tuning.
+\end{itemize}
+
+\textbf{19. A Real-World WebAgent with Planning, Long Context Understanding, and Program Synthesis (HTML-T5)} \\
+Gür, Furuta, Huang et al. --- ICLR 2024 | \href{https://arxiv.org/abs/2307.12856}{arxiv.org/abs/2307.12856}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Web agent action prediction
+    \item \textbf{Relevance to WEPO-DPO:} HTML-T5's local and global attention mechanisms for long HTML documents show that HTML structure is not well-handled by standard transformers. For your DPO training with cleaned HTML and 15 candidates, the token-level HTML structure needs to be preserved in both chosen and rejected responses. HTML-T5's pre-training objectives (local and global denoising) could serve as a starting checkpoint before DPO fine-tuning on your data.
+\end{itemize}
+
+\textbf{20. Ranking Approaches for Similarity-Based Web Element Location} \\
+Coppola, Feldt, Nass, Alégroth --- JSS 2024 | \href{https://linkinghub.elsevier.com/retrieve/pii/S0164121224003303}{doi.org/10.1016/j.jss.2024.112223}
+
+\begin{itemize}
+    \item \textbf{Supports:} \checkmark DOM/tree-aware grounding \checkmark Hard negative mining
+    \item \textbf{Relevance to WEPO-DPO:} From automated testing research (not AI), this paper uses Learning to Rank over 14 DOM-based locator features (XPath, CSS selector, text content, tag, attributes) to find the correct web element. It achieves 88.4\% top-1 accuracy using LTR with DOM similarity features. The DOM-based features (tag similarity, attribute overlap, text content similarity, structural path) are exactly the features that define LCA-close elements and provide empirical evidence that these features are predictive of element identity.
+    \item \textbf{Adaptation:} Use this paper's 14 locator features as a structured negative distance function. An element is a "hard negative" if it has high feature overlap with the gold on most of the 14 features. This is more precise than raw LCA depth, which ignores textual content similarity.
+\end{itemize}
+
+\section{Critical Evaluation: Are LCA/DOM-Distance Hard Negatives Theoretically and Empirically Justified?}
+
+\section{Arguments For LCA-Based Negatives}
+The LCA (Lowest Common Ancestor) distance is theoretically motivated by two web design patterns. First, web developers group semantically related elements within common parent containers --- a form's input fields share a parent \textless form\textgreater element, navigation links share a \textless nav\textgreater element, and table cells share \textless tr\textgreater/\textless td\textgreater ancestors. Elements that share a close LCA ancestor are therefore likely to be semantically similar in function, making the model's confusion between them plausible and making them appropriate hard negatives. Second, from the perspective of the DPO gradient: a good hard negative is one the model would plausibly predict. DOM-close elements typically share the same tag type, similar attributes, and similar text content --- the model is genuinely confused between them and will receive the strongest gradient signal from their discrimination.
+
+\section{Arguments Against LCA-Based Negatives (Critical Risks)}
+Three serious problems challenge LCA-based negatives. \textbf{First: False negative risk.} As demonstrated by Cai et al. (2022, CIKM) and your intuition, DOM-close elements are precisely those most likely to be valid alternative targets. In a search form with multiple input fields (first name, last name, email), all fields share the same parent and would have LCA distance 1 from each other. If the task is "fill the email field," the first-name field is an LCA-distance-1 negative --- but a different task might validly target it. Training the model to avoid it could hurt generalization.
+
+\textbf{Second: Empirical evidence from Dual-View (Kil et al., CVPR 2024) directly tests DOM-tree neighbors versus visual-spatial neighbors as context.} DOM-tree neighbors perform significantly worse (Table 12 in the paper: HTMLTREENEI\_PRED clearly below DUAL-VCR\_PRED). The paper's conclusion is that HTML tree structure is a weaker signal than visual-spatial proximity for determining semantic relationships. If DOM tree proximity is a poor measure of semantic similarity for contextualization, it is also a poor measure for negative selection --- DOM-close elements may not be semantically similar to the gold in ways that matter for the task.
+
+\textbf{Third: LCA depth is a coarse metric.} Two elements at LCA depth 1 (siblings) might be completely different (e.g., a "Submit" button and a "Terms of Service" link in the same footer), while two elements at LCA depth 3 (cousins) might be nearly identical (e.g., two "Add to Cart" buttons for different products). LCA depth does not capture attribute similarity, text content similarity, or visual appearance.
+
+\section{Recommended Hybrid Negative Strategy}
+Based on the evidence across all papers reviewed, the optimal negative selection strategy is a scored combination of three signals, applied with a false-negative filter:
+
+\begin{enumerate}
+    \item \textbf{Primary: Model-confidence negatives (ANCE-style, dynamic).} Select the non-gold candidate with the highest current-model probability. This directly targets the model's current confusion. Updated every 500 training steps. Theoretically strongest, empirically best in dense retrieval settings.
+    \item \textbf{Secondary: Visual-spatial proximity (Dual-View style, static).} Select the non-gold candidate with the smallest bounding box centroid distance. Empirically shown to be a better proximity measure than DOM tree distance for semantic relatedness in web contexts. Requires rendered bounding boxes.
+    \item \textbf{Fallback: LCA/DOM distance (original WEPO strategy, static).} Use when bounding boxes are unavailable (text-only pipeline). Apply with the attribute-overlap filter: reject any proposed DOM-negative that has $\ge$70\% attribute overlap with the gold element (to filter false negatives).
+    \item \textbf{False-negative filter (mandatory for all strategies).} Following NV-Retriever (Moreira et al., 2024): if the proposed negative's semantic similarity to the query exceeds $\tau$ $\times$ similarity(gold), exclude it. Set $\tau$=0.85 initially and tune on validation.
+\end{enumerate}
+
+Concretely, implement as follows: For each training sample, rank non-gold candidates by a weighted score: $s = \alpha \cdot \text{model\_conf} + \beta \cdot \text{visual\_proximity} + \gamma \cdot \text{LCA\_proximity}$ where $\alpha+\beta+\gamma$=1. Start with $\alpha$=0.5, $\beta$=0.3, $\gamma$=0.2 and ablate. Apply false-negative filter before finalizing the rejected candidate.
+
+\section{Summary Comparison Table}
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of Negative Strategies}
+\begin{tabular}{llllll}
+\toprule
+Negative Strategy & Theoretical Basis & Empirical Evidence & False Negative Risk & Implementation Cost & Recommendation \\
+\midrule
+LCA/DOM distance (WEPO) & DOM hierarchy reflects semantic grouping & +13.8\% over WebAgent & High & Very Low & Baseline; add filter \\
+Visual/spatial proximity & Web layout reflects semantic grouping & Outperforms DOM-tree & Medium & Medium & Best structural proxy \\
+Model-confidence (ANCE) & Align training/test distributions & Strong (+20\% NDCG) & Highest & High & Best dynamic strategy \\
+Semantic similarity (DMR) & Query-element semantic proximity & Implicit in WebLINX & Medium-High & Low-Medium & Good complement \\
+KTO (all candidates) & Prospect theory & Matches DPO & None & Low & Best if compute-limited \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

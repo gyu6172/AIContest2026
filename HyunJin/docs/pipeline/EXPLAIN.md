@@ -2,7 +2,7 @@
 > 최종 업데이트: 2026-05-12
 > 기준 코드: `src/preprocess.py` · `src/retrieval.py` · `src/train.py` · `src/inference.py`
 
-본 문서는 프로젝트의 전체 아키텍처, 단계별 상세 로직, 그리고 주요 설계 결정을 통합하여 관리합니다.
+본 문서는 프로젝트의 전체 아키텍처, 단계별 상세 로직, 그리고 WEPO 프레임워크 기반의 최신 설계 결정을 통합하여 관리합니다.
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## 2. 전체 흐름도 (Architecture Flow)
 
-현재 시스템은 HTML 타입에 따라 **Workflow**와 **Real Web** 두 가지 경로로 나뉩니다.
+현재 시스템은 HTML 타입에 따라 **Workflow**와 **Real Web** 두 가지 경로로 나뉘며, 학습 단계에서 **DPO(Direct Preference Optimization)**를 통해 선호도를 학습합니다.
 
 ```mermaid
 graph TD
@@ -45,50 +45,54 @@ graph TD
     Fallback --> Guard
     
     Guard --> End[submission.csv 저장]
+    
+    subgraph "WEPO Training (DPO)"
+        TrainData[Train CSV] --> LCA[LCA 거리 분석]
+        LCA --> HardNeg[매력적인 오답 선정]
+        HardNeg --> DPOTrain[DPOTrainer: 선호도 학습]
+    end
 ```
 
 ---
 
 ## 3. 핵심 모듈별 상세 설명
 
-### 3.1. 전처리 및 규칙 엔진 (`src/preprocess.py`)
-LLM 추론 전후의 데이터 정제 및 가드레일을 담당합니다.
+### 3.1. 전처리 및 구조 분석 (`src/preprocess.py`)
+LLM 추론 전후의 데이터 정제 및 DOM 트리 기반의 구조적 분석을 담당합니다.
 
+*   **LCA 거리 분석 (`get_dom_distance`)**: 두 HTML 요소 간의 거리를 DOM 트리 깊이를 기준으로 계산합니다 ($depth(u) + depth(v) - 2 \cdot depth(LCA)$).
+*   **매력적인 오답 선정 (`find_lca_hard_negative`)**: **WEPO 프레임워크**의 핵심 로직으로, 15개 후보 중 정답과 가장 인접한 요소를 오답(`Rejected`)으로 선정하여 모델의 변별력을 키웁니다.
 *   **HTML 컨텍스트 추출 (`get_html_context`)**: 요소 주변의 `label`, `parent`, `children`, `near`(이웃 형제) 텍스트를 추출하여 Dual-View 관점의 정보를 제공합니다.
 *   **후보 포맷팅 (`format_numbered_candidates`)**: 1~15번 번호를 부여하고, AgentOccam 기반의 속성 필터링(class, style 제거 등)을 적용합니다.
-*   **히스토리 압축 (`_compress_history`)**: `[tag]text→OP` 형식으로 압축하여 토큰 소모를 60-70% 절감합니다.
-*   **Consistency Guard (`enforce_consistency`)**: 모델이 잘못된 태그에 TYPE을 하거나 SELECT 옵션에 없는 값을 내뱉을 경우 규칙 기반으로 강제 수리합니다.
 
 ### 3.2. 검색기 (`src/retrieval.py`)
 훈련 데이터에서 유사한 성공 사례를 찾아 Few-shot 예시로 제공합니다 (현재 `USE_RETRIEVAL = False`).
-*   **우선순위**: (site, sig, type) → (site, type) → (sig, type) 순으로 검색.
-*   **유사도**: Task 단어 집합의 Jaccard 유사도 사용.
 
-### 3.3. 학습 모델 (`src/train.py`)
-*   **모델**: `Qwen3-8B` (unsloth 4bit 양자화) + LoRA (r=16, alpha=32).
-*   **데이터 증강**: `hard_negative_shuffle`을 통해 정답과 태그가 같은 요소를 바로 앞에 배치하여 변별력 강화.
-*   **Grounding 학습**: real_web을 위해 `action_desc`를 먼저 생성하는 Step 1 Grounding 데이터 포함.
+### 3.3. 학습 엔진 (`src/train.py`)
+기존 SFT 방식을 넘어 WEPO 프레임워크 기반의 선호도 최적화를 수행합니다.
+
+*   **DPO 학습 모드 (`USE_DPO = True`)**: `trl.DPOTrainer`를 사용하여 정답 액션(`Chosen`)과 매력적인 오답 액션(`Rejected`) 사이의 확률 격차를 극대화합니다.
+*   **Action Heuristic ($f_{op}$)**: 정답이 `TYPE/SELECT`일 때, 약 **33% 확률로 오답의 액션 타입을 `CLICK`으로 변조**하여 모델이 기능적 유사성에 매몰되지 않도록 학습시킵니다.
+*   **하이퍼파라미터**: `beta=0.1`, `learning_rate=5e-5` 등을 사용하여 안정적인 선호도 정렬을 수행합니다.
 
 ### 3.4. 추론 엔진 (`src/inference.py`)
-*   **Qwen3 Thinking Mode**: `<think>` 태그를 사용하여 모델의 추론 과정을 유도하고 최종 JSON만 파싱합니다.
-*   **토너먼트 방식**: 15개를 한 번에 보는 대신 5개씩 나누어 평가하여 `Target Acc` 병목을 해결합니다.
-*   **앙상블**: `--ensemble` 플래그 사용 시 3-Fold 모델의 다수결 투표를 진행합니다.
+*   **Qwen3 Thinking Mode**: `<think>` 태그를 통해 모델이 "먼저 생각하고 나중에 행동"하도록 유도합니다.
+*   **토너먼트 추론**: `real_web` 환경에서 15개 후보를 한 번에 비교하는 대신, 5개씩 소그룹으로 나누어 평가함으로써 인지 부하를 줄이고 `Target Acc`를 향상시킵니다.
 
 ---
 
-## 4. HTML 타입별 전략
+## 4. 핵심 전략: WEPO (Web Element Preference Optimization)
 
-| 타입 | 판별 조건 | 주요 전략 |
+| 기술 | 내용 | 기대 효과 |
 |:---|:---|:---|
-| **workflow** | `workflow-context` 포함 | 단계 정보(Step N of M)와 완료 필드 주입, 단발 추론 |
-| **real_web** | 그 외 일반 웹 | 2단계 Grounding + 3그룹 토너먼트 추론 |
+| **LCA Hard Negatives** | DOM 트리상 가장 가까운 요소를 오답으로 사용 | 유사한 위치의 오작동 방지 |
+| **f_op Mutation** | 오답의 액션 타입을 확률적으로 CLICK으로 변조 | 입력 필드에 대한 무조건적 TYPE 편향 제거 |
+| **Tournament QA** | 5-choice 멀티 라운드 서바이벌 방식 | Target Accuracy 병목 해결 |
 
 ---
 
-## 5. 성능 현황 (2026-05-10 기준)
+## 5. 성능 현황 (2026-05-12 기준)
 
 *   **Exact Match (Public)**: 0.7516
-*   **Target Acc**: 0.7825 (핵심 병목)
-*   **Op Acc**: 0.9728
-*   **Value Acc**: 0.9627
+*   **Target Acc**: 0.7825 (DPO 도입을 통해 0.85+ 목표)
 *   **workflow Exact**: 1.000 / **real_web Exact**: 0.356

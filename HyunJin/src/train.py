@@ -7,7 +7,7 @@ import json
 import re
 import random
 from unsloth import FastLanguageModel
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer, SFTConfig, DPOTrainer, DPOConfig
 from datasets import Dataset
 from sklearn.model_selection import GroupShuffleSplit, GroupKFold
 from sklearn.metrics import confusion_matrix
@@ -26,6 +26,7 @@ from preprocess import (
     RETRIEVAL_K,
     generate_cot_reasoning,
     hard_negative_shuffle,
+    find_lca_hard_negative,
 )
 from retrieval import ExampleRetriever
 
@@ -39,6 +40,7 @@ USE_RETRIEVAL             = False
 USE_CONSISTENCY           = True
 VALIDATION_MODE           = True  # False 로 바꾸면 전체 데이터 학습
 FINAL_TRAIN_ON_FULL_DATA  = False # True 로 바꾸면 val 없이 전체 학습
+USE_DPO                   = True  # SFT 대신 DPO 사용 여부
 
 # 학습 제외할 site_token (CLICK 편향 + test에 없음 — 팀원 분석)
 EXCLUDE_SITES = {"site_2aa627db"}
@@ -91,15 +93,17 @@ def prepare_training_data(
     realweb_aug_boost: int = 1,
     compact_prompt: bool = False,
 ):
-    """SFT용 (instruction, output) 쌍을 생성한다.
+    """DPO 또는 SFT용 학습 데이터를 생성한다.
 
-    변경 사항:
-    - 출력 형식: {"op": ..., "choice": <1~15>, "value": ...}
-    - target_id가 candidates에 없는 행은 skip (데이터 오류)
-    - shuffle_n > 0이면 candidate 순서를 셔플한 augmented 예시 추가
+    WEPO 프레임워크 적용 (DPO Mode):
+    1. Chosen: 정답 요소 (aw)
+    2. Rejected: LCA 거리가 가장 가까운 오답 요소 (al).
+       - 변별력 극대화를 위해 op/value는 chosen과 동일하게 유지 (요소 선택에만 집중).
+    3. f_op 휴리스틱: 정답이 TYPE/SELECT면 오답을 33% 확률로 CLICK으로 변조하여 기능적 변별력 추가.
     """
+    mode_str = "DPO" if USE_DPO else "SFT"
     print(
-        f"Preparing training data (shuffle_n={shuffle_n}, "
+        f"Preparing training data ({mode_str} Mode, shuffle_n={shuffle_n}, "
         f"realweb_aug_boost={realweb_aug_boost}, compact_prompt={compact_prompt})..."
     )
     instructions = []
@@ -113,21 +117,21 @@ def prepare_training_data(
             continue
 
         target_id = str(row.get("target_id", ""))
-        choice = None
+        chosen_choice = None
         for i, c in enumerate(candidates, 1):
             if str(c.get("candidate_id", "")) == target_id:
-                choice = i
+                chosen_choice = i
                 break
 
-        if choice is None:
+        if chosen_choice is None:
             skipped += 1
             continue
 
-        val = str(row["value"]) if pd.notna(row.get("value")) else ""
+        chosen_val = str(row["value"]) if pd.notna(row.get("value")) else ""
         if row["op"] == "CLICK":
-            val = ""
+            chosen_val = ""
 
-        # ── 원본 예시 ──
+        # ── 공통 Prompt ──
         prompt = build_prompt(
             row, candidates,
             retriever=retriever,
@@ -135,33 +139,70 @@ def prepare_training_data(
             exclude_id=row.get("id"),
             compact_candidates=compact_prompt,
         )
-        target_cand = next((c for c in candidates if str(c.get("candidate_id", "")) == target_id), {})
-        reasoning = generate_cot_reasoning(str(row.get("task", "")), row["op"], choice, target_cand, val, candidates=candidates)
-        # Qwen3 thinking format: <think>reasoning</think>\n{json}
-        answer = f"<think>\n{reasoning}\n</think>\n" + json.dumps({"op": row["op"], "choice": choice, "value": val})
-        instructions.append({"instruction": prompt, "input": "", "output": answer})
 
-        # ── Step 1 Grounding 학습 예시 (real_web만 — workflow는 불필요) ──
-        if detect_html_type(row) == "real_web":
+        # ── 1. Chosen Action ──
+        target_cand = candidates[chosen_choice - 1]
+        chosen_reasoning = generate_cot_reasoning(
+            str(row.get("task", "")), row["op"], chosen_choice, target_cand, chosen_val, candidates=candidates
+        )
+        chosen_output = f"<think>\n{chosen_reasoning}\n</think>\n" + json.dumps(
+            {"op": row["op"], "choice": chosen_choice, "value": chosen_val}
+        )
+
+        if USE_DPO:
+            # ── 2. Rejected Action (LCA 기반) ──
+            rejected_cand = find_lca_hard_negative(row, candidates, target_id)
+            if not rejected_cand:
+                skipped += 1
+                continue
+
+            rejected_id = str(rejected_cand.get("candidate_id", ""))
+            rejected_choice = next(i for i, c in enumerate(candidates, 1) if str(c.get("candidate_id", "")) == rejected_id)
+
+            # f_op 휴리스틱: TYPE/SELECT 시 33% 확률로 CLICK 변조, 그 외엔 chosen과 동일하게 유지
+            rejected_op = row["op"]
+            rejected_val = chosen_val
+            if row["op"] in ("TYPE", "SELECT") and random.random() < 0.33:
+                rejected_op = "CLICK"
+                rejected_val = ""
+
+            rejected_reasoning = generate_cot_reasoning(
+                str(row.get("task", "")), rejected_op, rejected_choice, rejected_cand, rejected_val, candidates=candidates
+            )
+            rejected_output = f"<think>\n{rejected_reasoning}\n</think>\n" + json.dumps(
+                {"op": rejected_op, "choice": rejected_choice, "value": rejected_val}
+            )
+
+            instructions.append({
+                "prompt":   f"### Instruction:\n{prompt}\n\n### Response:\n",
+                "chosen":   chosen_output,
+                "rejected": rejected_output
+            })
+        else:
+            # SFT 모드: 기존 (instruction, input, output) 쌍 유지
+            instructions.append({
+                "instruction": prompt,
+                "input": "",
+                "output": chosen_output
+            })
+
+        # ── Step 1 Grounding 학습 예시 (real_web만, SFT 전용) ──
+        # DPO 모드에서도 grounding 학습을 섞어줄 수 있으나, 일단 SFT로 명확히 분리
+        if not USE_DPO and detect_html_type(row) == "real_web":
             step1_prompt  = build_grounding_step1_prompt(row)
-            step1_desc    = generate_action_desc(row["op"], target_cand, val)
-            step1_answer  = f"<think>\n{reasoning[:80]}\n</think>\n" + json.dumps(
+            step1_desc    = generate_action_desc(row["op"], target_cand, chosen_val)
+            step1_answer  = f"<think>\n{chosen_reasoning[:80]}\n</think>\n" + json.dumps(
                 {"op": row["op"], "action_desc": step1_desc}
             )
             instructions.append({"instruction": step1_prompt, "input": "", "output": step1_answer})
 
-        # ── 셔플 augmentation (real_web은 2배 — workflow EM 이미 1.0) ──
+        # ── 셔플 Augmentation ──
         realweb_mult = 2 * max(1, int(realweb_aug_boost))
         effective_shuffle = shuffle_n * (realweb_mult if detect_html_type(row) == "real_web" else 1)
         for _ in range(effective_shuffle):
             shuffled = hard_negative_shuffle(candidates, target_id)
-            new_choice = None
-            for i, c in enumerate(shuffled, 1):
-                if str(c.get("candidate_id", "")) == target_id:
-                    new_choice = i
-                    break
-            if new_choice is None:
-                continue
+            new_chosen_choice = next(i for i, c in enumerate(shuffled, 1) if str(c.get("candidate_id", "")) == target_id)
+
             aug_prompt = build_prompt(
                 row, shuffled,
                 retriever=retriever,
@@ -169,12 +210,37 @@ def prepare_training_data(
                 exclude_id=row.get("id"),
                 compact_candidates=compact_prompt,
             )
-            aug_target_cand = next((c for c in shuffled if str(c.get("candidate_id", "")) == target_id), {})
-            aug_reasoning = generate_cot_reasoning(str(row.get("task", "")), row["op"], new_choice, aug_target_cand, val, candidates=shuffled)
-            aug_answer = f"<think>\n{aug_reasoning}\n</think>\n" + json.dumps({"op": row["op"], "choice": new_choice, "value": val})
-            instructions.append({"instruction": aug_prompt, "input": "", "output": aug_answer})
 
-    print(f"  총 {len(instructions)}개 생성 (원본+셔플{shuffle_n}회, skip: {skipped}개)")
+            aug_chosen_cand = shuffled[new_chosen_choice - 1]
+            aug_chosen_reasoning = generate_cot_reasoning(
+                str(row.get("task", "")), row["op"], new_chosen_choice, aug_chosen_cand, chosen_val, candidates=shuffled
+            )
+            aug_chosen_output = f"<think>\n{aug_chosen_reasoning}\n</think>\n" + json.dumps(
+                {"op": row["op"], "choice": new_chosen_choice, "value": chosen_val}
+            )
+
+            if USE_DPO:
+                new_rejected_choice = next(i for i, c in enumerate(shuffled, 1) if str(c.get("candidate_id", "")) == rejected_id)
+                aug_rejected_cand = shuffled[new_rejected_choice - 1]
+                aug_rejected_reasoning = generate_cot_reasoning(
+                    str(row.get("task", "")), rejected_op, new_rejected_choice, aug_rejected_cand, rejected_val, candidates=shuffled
+                )
+                aug_rejected_output = f"<think>\n{aug_rejected_reasoning}\n</think>\n" + json.dumps(
+                    {"op": rejected_op, "choice": new_rejected_choice, "value": rejected_val}
+                )
+                instructions.append({
+                    "prompt":   f"### Instruction:\n{aug_prompt}\n\n### Response:\n",
+                    "chosen":   aug_chosen_output,
+                    "rejected": aug_rejected_output
+                })
+            else:
+                instructions.append({
+                    "instruction": aug_prompt,
+                    "input": "",
+                    "output": aug_chosen_output
+                })
+
+    print(f"  총 {len(instructions)}개 예시 생성 ({mode_str} 모드, skip: {skipped}개)")
     return instructions
 
 
@@ -374,42 +440,72 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
     )
     dataset    = Dataset.from_list(train_data)
 
-    def formatting_prompts_func(examples):
-        texts = []
-        for instruction, output in zip(examples["instruction"], examples["output"]):
-            texts.append(f"### Instruction:\n{instruction}\n\n### Response:\n{output}")
-        return {"text": texts}
+    # ── Trainer 설정 ──
+    if USE_DPO:
+        print(f"\nStarting DPO training (1000 steps, beta=0.1)...")
+        trainer = DPOTrainer(
+            model            = model,
+            ref_model        = None, # PEFT 시 None 이면 자동으로 생성
+            processing_class = tokenizer,
+            train_dataset    = dataset,
+            max_prompt_length= 1024,
+            max_length       = 2048,
+            args = DPOConfig(
+                per_device_train_batch_size = 8, # DPO는 메모리 소모가 크므로 배치 축소
+                gradient_accumulation_steps = 4,
+                warmup_ratio               = 0.05,
+                max_steps                  = 1000,
+                learning_rate              = 5e-5, # DPO는 보통 SFT보다 낮은 LR 권장
+                fp16                       = not torch.cuda.is_bf16_supported(),
+                bf16                       = torch.cuda.is_bf16_supported(),
+                logging_steps              = 10,
+                save_steps                 = 200,
+                save_total_limit           = 3,
+                optim                      = "adamw_8bit",
+                weight_decay               = 0.01,
+                lr_scheduler_type          = "cosine",
+                seed                       = 3407,
+                output_dir                 = os.path.join(base_dir, "outputs"),
+                beta                       = 0.1,
+            ),
+        )
+    else:
+        print(f"\nStarting SFT training (1000 steps)...")
+        # SFT 전용 포맷팅 (DPO는 필요 없음)
+        def formatting_prompts_func(examples):
+            texts = []
+            for instruction, output in zip(examples["instruction"], examples["output"]):
+                texts.append(f"### Instruction:\n{instruction}\n\n### Response:\n{output}")
+            return {"text": texts}
+        dataset = dataset.map(formatting_prompts_func, batched=True)
 
-    dataset = dataset.map(formatting_prompts_func, batched=True)
+        trainer = SFTTrainer(
+            model            = model,
+            processing_class = tokenizer,
+            train_dataset    = dataset,
+            args = SFTConfig(
+                dataset_text_field         = "text",
+                max_seq_length             = max_seq_length,
+                dataset_num_proc           = 4,
+                padding_free               = True,
+                per_device_train_batch_size = 32,
+                gradient_accumulation_steps = 1,
+                warmup_ratio               = 0.05,
+                max_steps                  = 1000,
+                learning_rate              = 2e-4,
+                fp16                       = not torch.cuda.is_bf16_supported(),
+                bf16                       = torch.cuda.is_bf16_supported(),
+                logging_steps              = 20,
+                save_steps                 = 200,
+                save_total_limit           = 3,
+                optim                      = "adamw_8bit",
+                weight_decay               = 0.01,
+                lr_scheduler_type          = "cosine",
+                seed                       = 3407,
+                output_dir                 = os.path.join(base_dir, "outputs"),
+            ),
+        )
 
-    trainer = SFTTrainer(
-        model            = model,
-        processing_class = tokenizer,
-        train_dataset    = dataset,
-        args = SFTConfig(
-            dataset_text_field         = "text",
-            max_seq_length             = max_seq_length,
-            dataset_num_proc           = 4,
-            padding_free               = False,
-            per_device_train_batch_size = 32,
-            gradient_accumulation_steps = 1,
-            warmup_ratio               = 0.05,
-            max_steps                  = 3000,
-            learning_rate              = 2e-4,
-            fp16                       = not torch.cuda.is_bf16_supported(),
-            bf16                       = torch.cuda.is_bf16_supported(),
-            logging_steps              = 20,
-            save_steps                 = 300,
-            save_total_limit           = 3,
-            optim                      = "adamw_8bit",
-            weight_decay               = 0.01,
-            lr_scheduler_type          = "cosine",
-            seed                       = 3407,
-            output_dir                 = os.path.join(base_dir, "outputs"),
-        ),
-    )
-
-    print("\nStarting training (3000 steps, choice-based output)...")
     trainer.train()
 
     model.save_pretrained(os.path.join(base_dir, "lora_model"))
@@ -495,43 +591,72 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
         )
         dataset    = Dataset.from_list(train_data)
 
-        def formatting_prompts_func(examples):
-            texts = []
-            for instruction, output in zip(examples["instruction"], examples["output"]):
-                texts.append(f"### Instruction:\n{instruction}\n\n### Response:\n{output}")
-            return {"text": texts}
-
-        dataset = dataset.map(formatting_prompts_func, batched=True)
-
         fold_output_dir = os.path.join(base_dir, f"outputs_fold_{fold}")
-        trainer = SFTTrainer(
-            model            = model,
-            processing_class = tokenizer,
-            train_dataset    = dataset,
-            args = SFTConfig(
-                dataset_text_field         = "text",
-                max_seq_length             = max_seq_length,
-                dataset_num_proc           = 4,
-                padding_free               = False,
-                per_device_train_batch_size = 32,
-                gradient_accumulation_steps = 1,
-                warmup_ratio               = 0.05,
-                max_steps                  = 3000,
-                learning_rate              = 2e-4,
-                fp16                       = not torch.cuda.is_bf16_supported(),
-                bf16                       = torch.cuda.is_bf16_supported(),
-                logging_steps              = 20,
-                save_steps                 = 300,
-                save_total_limit           = 2,
-                optim                      = "adamw_8bit",
-                weight_decay               = 0.01,
-                lr_scheduler_type          = "cosine",
-                seed                       = 3407 + fold,
-                output_dir                 = fold_output_dir,
-            ),
-        )
 
-        print(f"\n  Starting fold {fold} training (3000 steps)...")
+        if USE_DPO:
+            print(f"\n  Starting fold {fold} DPO training (1000 steps, beta=0.1)...")
+            trainer = DPOTrainer(
+                model            = model,
+                ref_model        = None,
+                processing_class = tokenizer,
+                train_dataset    = dataset,
+                max_prompt_length= 1024,
+                max_length       = 2048,
+                args = DPOConfig(
+                    per_device_train_batch_size = 8,
+                    gradient_accumulation_steps = 4,
+                    warmup_ratio               = 0.05,
+                    max_steps                  = 1000,
+                    learning_rate              = 5e-5,
+                    fp16                       = not torch.cuda.is_bf16_supported(),
+                    bf16                       = torch.cuda.is_bf16_supported(),
+                    logging_steps              = 10,
+                    save_steps                 = 200,
+                    save_total_limit           = 2,
+                    optim                      = "adamw_8bit",
+                    weight_decay               = 0.01,
+                    lr_scheduler_type          = "cosine",
+                    seed                       = 3407 + fold,
+                    output_dir                 = fold_output_dir,
+                    beta                       = 0.1,
+                ),
+            )
+        else:
+            print(f"\n  Starting fold {fold} SFT training (1000 steps)...")
+            def formatting_prompts_func(examples):
+                texts = []
+                for instruction, output in zip(examples["instruction"], examples["output"]):
+                    texts.append(f"### Instruction:\n{instruction}\n\n### Response:\n{output}")
+                return {"text": texts}
+            dataset = dataset.map(formatting_prompts_func, batched=True)
+
+            trainer = SFTTrainer(
+                model            = model,
+                processing_class = tokenizer,
+                train_dataset    = dataset,
+                args = SFTConfig(
+                    dataset_text_field         = "text",
+                    max_seq_length             = max_seq_length,
+                    dataset_num_proc           = 4,
+                    padding_free               = True,
+                    per_device_train_batch_size = 32,
+                    gradient_accumulation_steps = 1,
+                    warmup_ratio               = 0.05,
+                    max_steps                  = 1000,
+                    learning_rate              = 2e-4,
+                    fp16                       = not torch.cuda.is_bf16_supported(),
+                    bf16                       = torch.cuda.is_bf16_supported(),
+                    logging_steps              = 20,
+                    save_steps                 = 200,
+                    save_total_limit           = 2,
+                    optim                      = "adamw_8bit",
+                    weight_decay               = 0.01,
+                    lr_scheduler_type          = "cosine",
+                    seed                       = 3407 + fold,
+                    output_dir                 = fold_output_dir,
+                ),
+            )
+
         trainer.train()
 
         fold_model_dir = os.path.join(base_dir, f"lora_model_fold_{fold}")
