@@ -714,8 +714,98 @@ def _compress_history(history_str: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# LCA (Lowest Common Ancestor) 분석 (DPO용)
+# ─────────────────────────────────────────────
+
+def get_dom_distance(soup, el1, el2) -> int:
+    """두 BeautifulSoup 요소 간의 DOM 트리 거리를 계산한다.
+    거리 = depth(el1) + depth(el2) - 2 * depth(LCA(el1, el2))
+    """
+    if not el1 or not el2:
+        return 999  # 거리를 측정할 수 없는 경우
+    if el1 == el2:
+        return 0
+
+    # 각 요소의 조상 노드 리스트 (root 방향)
+    path1 = [el1] + list(el1.parents)
+    path2 = [el2] + list(el2.parents)
+
+    # Root부터 내려오면서 공통 조상이 끝나는 지점 찾기
+    path1.reverse()
+    path2.reverse()
+
+    common_depth = 0
+    for n1, n2 in zip(path1, path2):
+        if n1 == n2:
+            common_depth += 1
+        else:
+            break
+
+    return (len(path1) + len(path2)) - (2 * common_depth)
+
+
+def find_lca_hard_negative(row, candidates, target_id):
+    """15개 후보 중 정답(target_id)과 DOM 트리상에서 가장 가까운 오답 요소를 반환한다.
+
+    WEPO 프레임워크 핵심: DOM 거리(LCA)가 가까운 요소가 가장 '매력적인 오답'임.
+    """
+    from bs4 import BeautifulSoup
+
+    html_str = str(row.get("cleaned_html", ""))
+    if not html_str or html_str == "nan":
+        # HTML이 없으면 랜덤하게 하나 선택 (fallback)
+        others = [c for c in candidates if str(c.get("candidate_id", "")) != target_id]
+        return random.choice(others) if others else None
+
+    try:
+        soup = BeautifulSoup(html_str, "lxml")
+    except Exception:
+        others = [c for c in candidates if str(c.get("candidate_id", "")) != target_id]
+        return random.choice(others) if others else None
+
+    # 1. 정답 요소 찾기
+    target_cand = next((c for c in candidates if str(c.get("candidate_id", "")) == target_id), None)
+    if not target_cand:
+        return None
+
+    target_el = _find_element_in_soup(soup, target_cand)
+    if not target_el:
+        # 정답 요소를 DOM에서 못 찾으면 랜덤 (fallback)
+        others = [c for c in candidates if str(c.get("candidate_id", "")) != target_id]
+        return random.choice(others) if others else None
+
+    # 2. 모든 오답 후보와의 거리 계산
+    best_neg = None
+    min_dist = 999
+
+    for c in candidates:
+        c_id = str(c.get("candidate_id", ""))
+        if c_id == target_id:
+            continue
+
+        c_el = _find_element_in_soup(soup, c)
+        if not c_el:
+            continue
+
+        dist = get_dom_distance(soup, target_el, c_el)
+        if dist < min_dist:
+            min_dist = dist
+            best_neg = c
+        elif dist == min_dist:
+            # 거리가 같으면 텍스트 유사도가 높은 것 선택 (추가 변별력)
+            if _candidate_match_score(c, row["task"]) > _candidate_match_score(best_neg or {}, row["task"]):
+                best_neg = c
+
+    # 3. 적절한 오답을 못 찾았을 경우 대비 (예: 모든 후보가 DOM 탐색 실패)
+    if not best_neg:
+        others = [c for c in candidates if str(c.get("candidate_id", "")) != target_id]
+        return random.choice(others) if others else None
+
+    return best_neg
+
+
+# ─────────────────────────────────────────────
 # RAG 포맷팅 & 프롬프트 빌더
-# (train.py / inference.py 공용 — 이 파일만 수정하면 됨)
 # ─────────────────────────────────────────────
 RETRIEVAL_K             = 3
 RETRIEVAL_TASK_CHARS    = 150
