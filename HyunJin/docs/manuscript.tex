@@ -1,0 +1,180 @@
+\documentclass[pdflatex,sn-mathphys-num]{sn-jnl}
+
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{mathrsfs}
+\usepackage[title]{appendix}
+\usepackage{xcolor}
+\usepackage{textcomp}
+\usepackage{manyfoot}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+\theoremstyle{thmstyleone}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+
+\theoremstyle{thmstyletwo}
+\newtheorem{example}{Example}
+\newtheorem{remark}{Remark}
+
+\theoremstyle{thmstylethree}
+\newtheorem{definition}{Definition}
+
+\raggedbottom
+\usepackage{amsmath}
+
+\begin{document}
+\title[Article Title]{Web UI Automation Analysis}
+\author*[1]{\fnm{Anonymous} \sur{}}\email{email@email.com}
+\affil*[1]{\orgdiv{Department}, \orgname{AFFILIATION}, \orgaddress{\street{Street}, \city{City}, \postcode{100190}, \state{State}, \country{Country}}}
+
+\abstract{Based on a comprehensive multi-angle search across web UI automation, structured action prediction, retrieval-augmented agents, constrained decoding, and hard-negative training, here is the full analysis mapped to your pipeline.}
+\keywords{Web UI Automation, Agentic Workflow, Retrieval-Augmented Generation, Constrained Decoding}
+\maketitle
+
+\section{Top 12 Papers Table}
+
+\begin{table}[htbp]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llclllll}
+\toprule
+\# & Title / Venue / Year & Match & Key Idea & Pipeline Fit & Gain & Cost & Risk \\
+\midrule
+1 & WEPO: Web Element Preference Optimization (AAAI 2025) & 5 & DPO on hard negatives & src/train.py DPO & target\_id & S & Low \\
+2 & Mind2Web (NeurIPS 2023) & 5 & Two-stage ranker & src/retrieval.py filter & target\_id & S & Low \\
+3 & Agent Workflow Memory (arXiv 2024) & 5 & Workflow routine retrieval & src/retrieval.py index & exact & M & Low \\
+4 & RaDA (ACL 2024) & 5 & Two-stage retrieval & src/retrieval.py split & op/target & M & Low \\
+5 & REGENT (arXiv 2024) & 4 & Semi-parametric policy & src/retrieval.py dense & target\_id & M & Med \\
+6 & Thinking Before Constraining (arXiv 2026) & 4 & Draft-conditioned decoding & src/inference.py FSM & format & S & Low \\
+7 & CoCo-Agent (ACL Findings 2024) & 5 & Op-conditioned prediction & src/train.py prefix & op/target & S & Low \\
+8 & ScribeAgent (arXiv 2024) & 4 & Domain-specific fine-tune & src/train.py data & exact & M & Low \\
+9 & WebCoT (arXiv 2025) & 4 & CoT distillation & src/train.py CoT & target\_id & M & Low \\
+10 & diff History (arXiv 2023) & 4 & Unix-diff history & src/preprocess.py diff & target\_id & S & Low \\
+11 & GTA1 (arXiv 2025) & 4 & Best-of-K sampling & src/inference.py voting & target\_id & S & Low \\
+12 & FANTASE (arXiv 2024) & 4 & Trie-constrained decode & src/inference.py trie & format & M & Med \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\section{Prioritized Shortlist}
+
+\section{Implement This Week}
+
+\subsection{CoCo-Agent Conditional Decomposition (Paper 7)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} Add a special <op> token as a CoT prefix before the JSON block. Train on your existing SFT data with a new output template: <op>TYPE</op>\{"op":"TYPE","target\_id":"...","value":"..."\}. Compare exact match on a held-out validation split.
+\item \textbf{Required code changes:} src/train.py: update output\_template, add op-token prefix loss weight $\times$2. src/inference.py: parse <op> tag first, use predicted op to constrain the candidate search space (e.g., for CLICK, skip all <input type=text> elements from candidate list).
+\item \textbf{Failure risk:} If op prediction accuracy is already near-perfect in your data, decomposition adds no signal. Validate by checking how often op errors co-occur with target errors --- if correlation is low, skip.
+\end{itemize}
+
+\subsection{diff History Encoding (Paper 10)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} Implement Python difflib.unified\_diff over consecutive cleaned\_html strings in history. Tokenize and measure average input length reduction vs. baseline. Test on validation set with same Qwen3-8B checkpoint, no retraining needed.
+\item \textbf{Required code changes:} src/preprocess.py: add build\_diff\_history(steps: List[str]) -> str function. Replace raw history concat with diff output. Add max\_context\_length guard to truncate oldest diffs first.
+\item \textbf{Failure risk:} If your HTML is already heavily cleaned/pruned, diff may be near-empty and uninformative. Fall back to raw history for first 2 steps (no previous state to diff against).
+\end{itemize}
+
+\subsection{Best-of-K Inference with Consistency Guard (Paper 11)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} For each test sample, generate K=5 JSON outputs (temperature=0.7). Apply your existing Consistency Guard to each; count valid outputs. Select the most frequent valid (op, target\_id) combination. No model retraining required.
+\item \textbf{Required code changes:} src/inference.py: wrap single-call generation with sample\_k(prompt, k=5). Apply consistency\_guard(output) to each. Implement majority vote over (op, target\_id) pairs. Log how often the voted output differs from top-1 greedy.
+\item \textbf{Failure risk:} Inference cost $\times$5. Viable only if GPU budget allows. Mitigate by triggering K>1 sampling only when confidence of greedy output is below threshold (e.g., top-token logprob < -0.5).
+\end{itemize}
+
+\subsection{Draft-Conditioned Constrained Decoding (Paper 6)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} Integrate lm-format-enforcer or outlines library with Qwen3. Measure: (a) format error rate before vs. after, (b) exact match change. Validate that reasoning quality is preserved by checking intermediate <think> content length.
+\item \textbf{Required code changes:} src/inference.py: detect boundary between <think>...</think> and the JSON block. Apply unconstrained decoding in <think> section; switch to JSON schema-constrained decoding after </think> token. Schema = \{"op": enum, "target\_id": string, "value": string\}.
+\item \textbf{Failure risk:} Some constrained decoding libraries have poor performance with Qwen3 tokenizer. Test tokenization boundary alignment before full deployment.
+\end{itemize}
+
+\section{High Upside, Medium Risk}
+
+\subsection{WEPO-style DPO Hard Negatives (Paper 1)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} For each SFT training sample, the gold candidate is the "chosen" response. Construct "rejected" responses by: (a) substituting the gold target\_id with the 2nd or 3rd closest DOM-neighbor candidate, (b) substituting with a same-tag element from a different page section. Train DPO on top of SFT checkpoint for 1--2 epochs.
+\item \textbf{Required code changes:} src/train.py: add build\_dpo\_pairs(sample) that generates rejected completions. Implement DPO loss alongside CE loss with a mixing ratio ($\lambda_{DPO} = 0.3$ initially).
+\item \textbf{Failure risk:} If your candidate set is already highly curated, distance-based negatives may be too easy and provide no gradient signal.
+\end{itemize}
+
+\subsection{Agent Workflow Memory Retrieval (Paper 3)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} Cluster your training trajectories by site + task-template into 50--100 workflows. At inference, retrieve the top-1 matching workflow by (site, history signature) similarity. Inject as a prefix block.
+\item \textbf{Required code changes:} src/retrieval.py: add WorkflowIndex class. Index built offline. Injection prepended to similar-examples block.
+\end{itemize}
+
+\subsection{WebCoT Rationale Annotation (Paper 9)}
+\begin{itemize}
+\item \textbf{Minimal experiment design:} Use a larger teacher model (Qwen3-72B) to annotate 5--10K training samples with rationales. Fine-tune Qwen3-8B on these.
+\item \textbf{Required code changes:} src/train.py: update data pipeline to include rationale prefix in output template.
+\end{itemize}
+
+\section{Direct Mapping to Your Code Modules}
+
+\section{src/retrieval.py}
+\begin{itemize}
+\item \textbf{RaDA Integration:} Split into retrieve\_task\_exemplar (task-level) and retrieve\_step\_exemplar (step-level).
+\item \textbf{AWM Integration:} Add WorkflowMemory class; gate injection by confidence score > 0.6.
+\item \textbf{REGENT Integration:} Add dense retriever branch (bi-encoder 384-dim embedding + FAISS index).
+\end{itemize}
+
+\section{src/preprocess.py}
+\begin{itemize}
+\item \textbf{diff History:} Add build\_diff\_history using difflib.unified\_diff.
+\item \textbf{Candidate Ranker:} Add rank\_candidates(task, history, candidates) using DeBERTa cross-encoder; filter to top-K=10.
+\end{itemize}
+
+\section{src/train.py}
+\begin{itemize}
+\item \textbf{WEPO DPO:} Add build\_dpo\_pairs; use DPOTrainer with $\beta=0.1$.
+\item \textbf{CoCo-Agent:} Modify output\_template; weight op-token loss $\times$2.
+\item \textbf{ScribeAgent:} 70\% workflow data / 30\% real\_web data; 8K context; LR 1e-5.
+\end{itemize}
+
+\section{src/inference.py}
+\begin{itemize}
+\item \textbf{DCCD Decoding:} Add draft\_conditioned\_decode using outlines or lm-format-enforcer.
+\item \textbf{GTA1 Best-of-K:} Add best\_of\_k\_inference; log activation rate.
+\item \textbf{FANTASE Trie:} Add build\_valid\_action\_trie for per-sample FSM construction.
+\end{itemize}
+
+\section{Ablation Plan}
+
+\begin{table}[htbp]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llll}
+\toprule
+\# & Ablation & Metric & Direction \\
+\midrule
+A1 & Remove order aug & target\_id accuracy & Drop 3-8\% \\
+A2 & Add DPO negatives & target\_id accuracy & Gain 5-12\% \\
+A3 & Full raw history & target\_id accuracy & Drop 3-6\% \\
+A4 & Add pre-ranker & target\_id accuracy & Gain 4-9\% \\
+A5 & CoCo 2-stage & op/target accuracy & Gain \\
+A6 & Constrained decode & exact match & Format error $\to$ 0\% \\
+A7 & Best-of-K (K=5) & exact match & Gain 2-5\% \\
+A8 & Workflow retrieval & exact match & Gain 8-15\% \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\section{Rejection Filter --- 5 Low-ROI Directions}
+\begin{enumerate}
+\item \textbf{Visual Grounding:} Vision encoders add significant overhead; unless switching to vision-native agents, the ROI is low for HTML-rich pipelines.
+\item \textbf{Online RL:} Requires complex sandbox and 100x compute; SFT/DPO has much more headroom at your current stage.
+\item \textbf{World Models:} Transition-focused abstractions are complex and target planning horizon, not element selection.
+\item \textbf{Tool-Use Abstraction:} Architectural pivot that invalidates training data and benchmarks.
+\item \textbf{Generic Context Compression:} Diff-history is already a near-free, efficient solution for your specific needs.
+\end{enumerate}
+
+\end{document}
