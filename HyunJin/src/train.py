@@ -442,22 +442,24 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
 
     # ── Trainer 설정 ──
     if USE_DPO:
-        print(f"\nStarting DPO training (3000 steps, beta=0.1)...")
+        print(f"\nStarting DPO training (1000 steps, beta=0.1)...")
         trainer = DPOTrainer(
             model            = model,
             ref_model        = None, # PEFT 시 None 이면 자동으로 생성
             processing_class = tokenizer,
             train_dataset    = dataset,
+            max_prompt_length= 1024,
+            max_length       = 2048,
             args = DPOConfig(
-                per_device_train_batch_size = 4, # DPO는 메모리 소모가 크므로 배치 축소
-                gradient_accumulation_steps = 8,
+                per_device_train_batch_size = 8, # DPO는 메모리 소모가 크므로 배치 축소
+                gradient_accumulation_steps = 4,
                 warmup_ratio               = 0.05,
-                max_steps                  = 3000,
+                max_steps                  = 1000,
                 learning_rate              = 5e-5, # DPO는 보통 SFT보다 낮은 LR 권장
                 fp16                       = not torch.cuda.is_bf16_supported(),
                 bf16                       = torch.cuda.is_bf16_supported(),
                 logging_steps              = 10,
-                save_steps                 = 300,
+                save_steps                 = 200,
                 save_total_limit           = 3,
                 optim                      = "adamw_8bit",
                 weight_decay               = 0.01,
@@ -465,12 +467,10 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                 seed                       = 3407,
                 output_dir                 = os.path.join(base_dir, "outputs"),
                 beta                       = 0.1,
-                max_prompt_length          = 1024,
-                max_length                 = 2048,
             ),
         )
     else:
-        print(f"\nStarting SFT training (3000 steps)...")
+        print(f"\nStarting SFT training (1000 steps)...")
         # SFT 전용 포맷팅 (DPO는 필요 없음)
         def formatting_prompts_func(examples):
             texts = []
@@ -487,16 +487,16 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                 dataset_text_field         = "text",
                 max_seq_length             = max_seq_length,
                 dataset_num_proc           = 4,
-                padding_free               = False,
+                padding_free               = True,
                 per_device_train_batch_size = 32,
                 gradient_accumulation_steps = 1,
                 warmup_ratio               = 0.05,
-                max_steps                  = 3000,
+                max_steps                  = 1000,
                 learning_rate              = 2e-4,
                 fp16                       = not torch.cuda.is_bf16_supported(),
                 bf16                       = torch.cuda.is_bf16_supported(),
                 logging_steps              = 20,
-                save_steps                 = 300,
+                save_steps                 = 200,
                 save_total_limit           = 3,
                 optim                      = "adamw_8bit",
                 weight_decay               = 0.01,
@@ -594,22 +594,24 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
         fold_output_dir = os.path.join(base_dir, f"outputs_fold_{fold}")
 
         if USE_DPO:
-            print(f"\n  Starting fold {fold} DPO training (3000 steps, beta=0.1)...")
+            print(f"\n  Starting fold {fold} DPO training (1000 steps, beta=0.1)...")
             trainer = DPOTrainer(
                 model            = model,
                 ref_model        = None,
                 processing_class = tokenizer,
                 train_dataset    = dataset,
+                max_prompt_length= 1024,
+                max_length       = 2048,
                 args = DPOConfig(
-                    per_device_train_batch_size = 4,
-                    gradient_accumulation_steps = 8,
+                    per_device_train_batch_size = 8,
+                    gradient_accumulation_steps = 4,
                     warmup_ratio               = 0.05,
-                    max_steps                  = 3000,
+                    max_steps                  = 1000,
                     learning_rate              = 5e-5,
                     fp16                       = not torch.cuda.is_bf16_supported(),
                     bf16                       = torch.cuda.is_bf16_supported(),
                     logging_steps              = 10,
-                    save_steps                 = 300,
+                    save_steps                 = 200,
                     save_total_limit           = 2,
                     optim                      = "adamw_8bit",
                     weight_decay               = 0.01,
@@ -617,12 +619,10 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                     seed                       = 3407 + fold,
                     output_dir                 = fold_output_dir,
                     beta                       = 0.1,
-                    max_prompt_length          = 1024,
-                    max_length                 = 2048,
                 ),
             )
         else:
-            print(f"\n  Starting fold {fold} SFT training (3000 steps)...")
+            print(f"\n  Starting fold {fold} SFT training (1000 steps)...")
             def formatting_prompts_func(examples):
                 texts = []
                 for instruction, output in zip(examples["instruction"], examples["output"]):
@@ -638,16 +638,16 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                     dataset_text_field         = "text",
                     max_seq_length             = max_seq_length,
                     dataset_num_proc           = 4,
-                    padding_free               = False,
+                    padding_free               = True,
                     per_device_train_batch_size = 32,
                     gradient_accumulation_steps = 1,
                     warmup_ratio               = 0.05,
-                    max_steps                  = 3000,
+                    max_steps                  = 1000,
                     learning_rate              = 2e-4,
                     fp16                       = not torch.cuda.is_bf16_supported(),
                     bf16                       = torch.cuda.is_bf16_supported(),
                     logging_steps              = 20,
-                    save_steps                 = 300,
+                    save_steps                 = 200,
                     save_total_limit           = 2,
                     optim                      = "adamw_8bit",
                     weight_decay               = 0.01,

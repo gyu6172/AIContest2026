@@ -185,6 +185,8 @@
   },
   "active": "4af3be30918f0651",
   "lastOpenFiles": [
+    "todo/0512_dpo_refactor_plan.md",
+    "todo",
     "WEPO DPO Literature Review_latex/manuscript.pdf",
     "research/0512_analzye.md",
     "research/PAPER_ANALYZE.md",
@@ -197,7 +199,6 @@
     "WEPO DPO Literature Review_latex/sn-mathphys-ay.bst",
     "WEPO DPO Literature Review_latex/sn-jnl.cls",
     "WEPO DPO Literature Review_latex/sn-chicago.bst",
-    "WEPO DPO Literature Review_latex/sn-bibliography.bib",
     "pipeline/EXPLAIN.md"
   ]
 }
