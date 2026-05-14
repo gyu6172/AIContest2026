@@ -1,495 +1,185 @@
-# 디지털경진대회 마스터 플랜 — Web Agent Action Prediction
+# CLAUDE.md
 
-## 0. 대회 개요
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-| 항목 | 내용 |
-|------|------|
-| **Task** | 웹 UI 에이전트의 다음 행동 예측 |
-| **Input** | task + history + cleaned_html + candidate_elements(15개) |
-| **Output** | op (CLICK/TYPE/SELECT) + target_id + value |
-| **Metric** | Exact Match (3개 필드 모두 일치해야 점수) |
-| **Train** | 10,307행 |
-| **Test 제출** | 4,417행 |
-| **고유 사이트** | 97개 (site_token) |
-| **제출 제한** | 100회 |
+---
+
+## 대회 개요
+
+웹 UI 에이전트 다음 행동 예측. Input: task + history + cleaned_html + candidate_elements(15개). Output: op(CLICK/TYPE/SELECT) + target_id + value. Metric: Exact Match (3필드 전부 일치). Train/Test: 10,307 / 4,417행, 97개 site_token. 제출 한도 100회.
 
 op 분포: CLICK 55.6% / TYPE 25.8% / SELECT 18.6%
 
+현재 최고 성능: Exact 0.7516, Target 0.7825, Op 0.9728, Value 0.9627 (35회 제출)
+
 ---
 
-## 1. 데이터 구조
+## 명령어
 
-### 1.1 컬럼 설명
+```bash
+# 학습 (단일)
+python src/train.py
 
-| 컬럼 | 타입 | 설명 |
+# 학습 (OOF 3-Fold → 앙상블용 lora_model_fold_0~2 생성)
+python src/train.py --oof
+
+# 학습 플래그
+# --e2  real_web 증강 2배 부스트
+# --e3  compact 후보 포맷 사용
+
+# 추론 (단일 lora_model/)
+python src/inference.py
+
+# 추론 (앙상블 다수결)
+python src/inference.py --ensemble
+
+# 추론 플래그
+# --e3  compact 후보 포맷 (train --e3와 맞춰야 함)
+
+# 진단
+python scripts/diagnostic.py   # 프롬프트 길이 / 타깃 유효성
+python scripts/check_target.py # default candidate 비율
+```
+
+---
+
+## 아키텍처
+
+### 파이프라인 흐름
+
+```
+data/train.csv ──> ExampleRetriever().build()  (RAG 인덱스)
+
+data/test.csv 행
+  └─> build_prompt()               [RAG + A-Tree + 압축 History + Reasoning Guidelines]
+        └─> LLM (Qwen3.6-35B LoRA + thinking)
+              │ target_id 무효 시
+              ▼
+          fallback_rule_based()    [tag→op 규칙, score 기반 후보 선택]
+              │
+              ▼
+          enforce_consistency()    [op/tag/value 가드레일]
+              │
+              ▼
+         submission.csv + artifacts/inference_report.json
+```
+
+### HTML 타입 분기
+
+`detect_html_type(row)` → `"workflow"` 또는 `"real_web"`. 판별 기준: HTML 내 `workflow-context` / `completed-fields` 키워드. Workflow 행은 프롬프트에 `[Workflow Status]` 블록(step 진행도, completed fields) 추가.
+
+### 프롬프트 구조 (`build_prompt`)
+
+1. **Universal Rerank**: CrossEncoder(`cross-encoder/ms-marco-MiniLM-L-6-v2`)로 후보 task 관련도 순 정렬
+2. **RAG**: `ExampleRetriever.query()` → 유사 과거 예시 k=5개
+3. **A-Tree 포맷팅**: BeautifulSoup으로 HTML 파싱 → 후보의 조상 경로+형제 노드를 인덴트 트리로 표현 (`format_as_tree`)
+4. **History 압축**: AgentOccam 방식, `[tag]text→OP:value` 형태로 60~70% 토큰 절약
+5. **Reasoning Guidelines**: 5단계 논리 가이드 (task 이해 → 요소 분석 → 대비 → 일관성 → 출력)
+6. 출력: `<think>...</think>` + JSON `{"op", "choice", "value"}`
+
+---
+
+## 모델/학습 설정
+
+| 항목 | 값 |
+|------|-----|
+| Base | `unsloth/Qwen3.6-35B-A3B-4bit` |
+| LoRA | r=16, alpha=32, 7개 모듈(`q,k,v,o,gate,up,down_proj`) |
+| 학습 모드 | **DPO 기본** (`USE_DPO = True`), SFT는 플래그로 전환 |
+| DPO | beta=0.1, 1 epoch, lr=5e-5, bf16, adamw_8bit, cosine |
+| SFT | 1 epoch, lr=1e-4, same optimizer |
+| max_seq_length | 학습 8192 / 추론 16384 |
+| Inference batch | 64 |
+| max_new_tokens | 512 (thinking + CoT + JSON) |
+
+**학습 플래그 위치**: `src/train.py` 상단 런타임 플래그 블록. 변경이 필요한 건 여기서만.
+
+```python
+FINAL_TRAIN_ON_FULL_DATA = False  # True로 바꾸면 검증 없이 전체 데이터 학습
+USE_DPO = True                    # False → SFT 모드
+EXCLUDE_SITES = {"site_2aa627db"} # CLICK 편향 96.5%, test에 없음 → 제외
+```
+
+---
+
+## DPO 학습 데이터 생성 (WEPO 프레임워크)
+
+`prepare_training_data()`:
+
+- **Chosen**: 정답 후보 + CoT reasoning (`generate_cot_reasoning`)
+- **Rejected**: `find_lca_hard_negative()` — DOM 거리(LCA) + CrossEncoder 점수 복합 스코어로 "가장 헷갈리는 오답" 선택. False-negative 필터(text/label 동일 후보 제외) 적용
+- **f_op 휴리스틱**: TYPE/SELECT 정답일 때 33% 확률로 rejected_op → CLICK 변조 (기능 변별력 추가)
+- **셔플 증강**: `hard_negative_shuffle()` — 랜덤 셔플 후 정답과 동일 tag의 hard negative를 정답 바로 앞에 배치. real_web은 3배 더 많이 셔플
+
+---
+
+## 주요 함수 관계
+
+| 함수 | 위치 | 역할 |
 |------|------|------|
-| id | str | `aac_mix_train_XXXXXX` |
-| site_token | str | 사이트 식별자 (97개) → 같은 토큰 = 고정된 워크플로우 |
-| task | str | 전체 작업 목표 (자연어, 모든 입력값 포함) |
-| history | str | 이미 완료된 스텝들 |
-| cleaned_html | str | 현재 페이지 HTML |
-| candidate_elements | str(JSON) | 15개 상호작용 요소 배열 |
-| op | str | **예측**: CLICK/TYPE/SELECT |
-| target_id | str | **예측**: 요소 ID (elem_XXXXXXXX) |
-| value | str | **예측**: 입력값 (CLICK이면 "") |
-
-### 1.2 History 포맷
-
-```
-Step 1: [button] New menu update -> CLICK
-Step 2: [input] Menu item -> TYPE: citrus salad
-Step 3: [select] Station -> SELECT: Grab-and-go
-```
-
-패턴: `Step N: [tag] label_text -> OP[: value]`
-
-### 1.3 Candidate Elements 포맷
-
-```json
-{
-  "candidate_id": "elem_6ad3dc45",
-  "tag": "input",
-  "text": "Recipe card",
-  "attrs": "label=Recipe card | placeholder=Recipe card | name=recipe_card | type=text"
-}
-```
-
-**중요**: SELECT는 attrs에 `options=A / B / C` 형태로 선택지 포함.
+| `build_prompt` | preprocess.py | 프롬프트 조립 (rerank → RAG → A-Tree → 압축 history) |
+| `enforce_consistency` | preprocess.py | op/target_id/value 가드레일. `_task` 키를 임시로 받고 반환 전 제거 |
+| `fallback_rule_based` | preprocess.py | LLM 실패 시 tag→op 규칙 + 점수 기반 후보 선택 |
+| `extract_value_from_task` | preprocess.py | SELECT options 매칭 → 따옴표 → label 기반 TYPE → 날짜 regex 순 |
+| `ExampleRetriever.query` | retrieval.py | (site, sig, html_type) 5단계 fallback으로 예시 검색 |
+| `find_lca_hard_negative` | preprocess.py | DPO rejected 샘플 선택 (LCA + CrossEncoder) |
+| `format_as_tree` | preprocess.py | HTML → 후보 중심 인덴트 A-Tree |
+| `_compress_history` | preprocess.py | History 토큰 압축 |
+| `detect_html_type` | preprocess.py | workflow vs real_web 분기 |
 
 ---
 
-## 2. 핵심 데이터 인사이트
+## Consistency Guard 규칙 (`enforce_consistency`)
 
-### 2.1 History 분석
-
-History는 **워크플로우 상태 머신**:
-- **현재 스텝**: `len(parse_history(history)) + 1`
-- **패턴**: 같은 site_token → 고정된 액션 시퀀스
-
-**예**: site_068d6fb3
-```
-Step 1: CLICK "New menu update"
-Step 2: TYPE menu item name (from task)
-Step 3: SELECT station (from task)
-Step 4: SELECT date (from task)
-Step 5: CLICK "Publish"
-```
-
-### 2.2 Value 추출 가능성: 95.85%
-
-- **TYPE/SELECT value의 95.85%가 task 문장에 그대로 포함됨**
-- **전략**: task 텍스트에서 직접 추출 (regex + fuzzy matching)
-- **4.15% 엣지케이스**: LLM이 처리
-
-### 2.3 요소 텍스트 매칭: 21.21%
-
-- **정답 요소의 텍스트가 task에 있는 비율: 21.21%**
-- "Submit" vs "Publish" 같은 의미론적 차이 존재
-- **해결책**: Stage 1 (Site-Template)이 이 문제를 완전히 우회 (step 번호로 직접 매핑)
-- Stage 2 (fuzzy) + Stage 3 (LLM)가 의미론적 유사도 처리
-
-### 2.4 Candidates 고정: 15개
-
-- **모든 샘플의 후보 요소가 정확히 15개**
-- **15-class classification 문제**로 접근 가능
-- tag → op 상관관계 거의 결정적: button→CLICK, input→TYPE, select→SELECT
+- invalid op → CLICK
+- invalid target_id → fallback_rule_based → 첫 번째 후보 (최후 안전망)
+- CLICK + select 태그 → options 추출 성공 시 SELECT 업그레이드, 실패 시 button/a로 교체
+- SELECT value → options 중 task와 가장 일치하는 것, 실패 시 첫 번째 옵션
+- CLICK value → 항상 `""`
 
 ---
 
-## 3. History 파싱 코드
+## Retriever 인덱스 구조
 
-```python
-import re
+5단계 fallback 쿼리 (우선순위 순):
+1. `(site, history_sig, html_type)` — 가장 정확
+2. `(site, html_type)`
+3. `(sig, html_type)`
+4. `(site, sig)` — html_type 무관
+5. `(site)` — 최종 fallback
 
-def parse_history(history: str) -> list:
-    steps = []
-    if not history or not str(history).strip():
-        return steps
-    for line in str(history).strip().split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r'Step (\d+): \[(\w+)\] (.+?) -> (\w+)(?:: (.*))?', line)
-        if m:
-            steps.append({
-                'step': int(m.group(1)),
-                'tag': m.group(2),
-                'label': m.group(3).strip(),
-                'op': m.group(4).strip(),
-                'value': (m.group(5) or '').strip()
-            })
-    return steps
-
-def get_current_step_num(history: str) -> int:
-    steps = parse_history(history)
-    return (steps[-1]['step'] + 1) if steps else 1
-
-def clean_history_context(history: str) -> str:
-    """스텝 번호 재정렬만 수행. HOVER는 UI 패턴 신호로 유지."""
-    steps = parse_history(history)
-    lines = []
-    for i, s in enumerate(steps, 1):
-        val = f": {s['value']}" if s['value'] else ''
-        lines.append(f"Step {i}: [{s['tag']}] {s['label']} -> {s['op']}{val}")
-    return '\n'.join(lines)
-```
+Jaccard 유사도(`_jaccard`)로 task 기반 재정렬 후 top-k 반환.
 
 ---
 
-## 4. Site-Template 학습
+## 데이터 스키마
 
-```python
-from collections import Counter
+| 컬럼 | 설명 |
+|------|------|
+| `site_token` | 사이트 식별자 (97개) |
+| `task` | 자연어 목표 (value 95.85% 확률로 포함) |
+| `history` | `Step N: [tag] label -> OP[: value]` |
+| `cleaned_html` | 현재 페이지 HTML |
+| `candidate_elements` | 15개 요소 JSON (`candidate_id`, `tag`, `text`, `attrs`) |
+| `op / target_id / value` | 예측 대상 |
 
-def get_target_info(row):
-    try:
-        cands = json.loads(row['candidate_elements'])
-        for c in cands:
-            if c['candidate_id'] == row['target_id']:
-                return c['tag'], c['text']
-    except:
-        pass
-    return None, None
-
-def build_site_templates(train_df):
-    """각 site_token의 스텝별 가장 빈번한 (op, label, tag) 추출"""
-    df = train_df.copy()
-    df[['target_tag', 'target_label']] = df.apply(
-        lambda r: pd.Series(get_target_info(r)), axis=1
-    )
-    df['step_num'] = df['history'].apply(get_current_step_num)
-    
-    templates = {}
-    for site, grp in df.groupby('site_token'):
-        template = {}
-        for step, sgrp in grp.groupby('step_num'):
-            op = Counter(sgrp['op']).most_common(1)[0][0]
-            label = Counter(sgrp['target_label']).most_common(1)[0][0]
-            tag = Counter(sgrp['target_tag']).most_common(1)[0][0]
-            template[step] = {'op': op, 'label': label, 'tag': tag}
-        templates[site] = template
-    
-    return templates
-```
+`attrs` 포맷: `key=value | key=value`. SELECT의 options: `options=A / B / C`.
 
 ---
 
-## 5. 3단계 파이프라인
+## 제출 체크리스트
 
-```
-[Input Row]
-     ↓
-[Stage 1: Site-Template] (step 기반 매핑, 21.21% 문제 우회)
-  confidence ≥ 0.9? → return
-  else → Stage 2
-     ↓
-[Stage 2: Rule-Based] (fuzzy + tag-based op, value extraction)
-  confidence ≥ 0.7? → return
-  else → Stage 3
-     ↓
-[Stage 3: LLM] (Qwen2.5-7B, CoT, Repair Loop)
-  → json output with validation
-  → fallback to Stage 2
-```
-
-### Stage 1: Site-Template
-
-```python
-def predict_by_template(row, templates, candidates):
-    site = row['site_token']
-    if site not in templates:
-        return None, 0.0
-    
-    template = templates[site]
-    step_num = get_current_step_num(str(row['history']))
-    
-    if step_num not in template:
-        return None, 0.0
-    
-    expected = template[step_num]
-    target_id = match_candidate_by_label(expected['label'], candidates)
-    if not target_id:
-        return None, 0.0
-    
-    op = expected['op']
-    if op == 'CLICK':
-        value = ''
-    elif op == 'TYPE':
-        value = extract_type_value(str(row['task']), expected['label'])
-    elif op == 'SELECT':
-        target_cand = next((c for c in candidates if c['candidate_id'] == target_id), None)
-        value = match_select_option(str(row['task']), target_cand['attrs']) if target_cand else ''
-    else:
-        value = ''
-    
-    confidence = 0.95 if (value or op == 'CLICK') else 0.5
-    return {'op': op, 'target_id': target_id, 'value': value}, confidence
-```
-
-### Stage 2: Rule-Based
-
-```python
-from difflib import get_close_matches
-
-def match_candidate_by_label(query: str, candidates: list) -> str:
-    query_n = query.lower().strip()
-    
-    # 1. Exact match
-    for c in candidates:
-        if c['text'].lower().strip() == query_n:
-            return c['candidate_id']
-    
-    # 2. Match attrs label
-    for c in candidates:
-        attrs = c.get('attrs', '')
-        if 'label=' in attrs:
-            label_val = attrs.split('label=')[1].split(' | ')[0].lower()
-            if label_val == query_n:
-                return c['candidate_id']
-    
-    # 3. Fuzzy match
-    texts = [c['text'] for c in candidates]
-    matches = get_close_matches(query, texts, n=1, cutoff=0.5)
-    if matches:
-        for c in candidates:
-            if c['text'] == matches[0]:
-                return c['candidate_id']
-    
-    return None
-
-def parse_select_options(attrs: str) -> list:
-    if 'options=' not in attrs:
-        return []
-    opts_str = attrs.split('options=')[1].split(' | ')[0]
-    return [o.strip() for o in opts_str.split(' / ') if o.strip()]
-
-def match_select_option(task: str, attrs: str) -> str:
-    options = parse_select_options(attrs)
-    if not options:
-        return ''
-    task_lower = task.lower()
-    
-    for opt in options:
-        if opt.lower() in task_lower:
-            return opt
-    
-    matches = get_close_matches(task, options, n=1, cutoff=0.4)
-    return matches[0] if matches else options[0]
-
-def extract_type_value(task: str, field_label: str) -> str:
-    # 1. 날짜
-    dates = re.findall(r'\d{4}-\d{2}-\d{2}', task)
-    if dates and any(kw in field_label.lower() for kw in ['date', 'time', 'when']):
-        return dates[0]
-    
-    # 2. field_label 뒤 값
-    label_lower = field_label.lower()
-    task_lower = task.lower()
-    idx = task_lower.find(label_lower)
-    if idx != -1:
-        after = task[idx + len(field_label):].strip()
-        value = re.split(r'[,.]', after)[0].strip()
-        if value:
-            return value
-    
-    # 3. 따옴표 값
-    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', task)
-    if quoted:
-        return quoted[0][0] or quoted[0][1]
-    
-    return ''
-```
-
-### Stage 3: LLM Prompt
-
-```
-System: You are a precise web automation agent. Predict the EXACT NEXT action.
-
-### Full Task Goal
-{task}
-
-### Already Completed Steps
-{history_formatted}
-(현재 스텝: {current_step_num})
-
-### Available Elements (15 candidates)
-{candidates_formatted}
-
-각 SELECT에 options: A / B / C 형태로 선택지 포함
-각 INPUT에 placeholder/label 정보 포함
-
-### Output (JSON only)
-{"op": "CLICK|TYPE|SELECT", "target_id": "elem_xxx", "value": "..."}
-```
-
-**Repair Loop** (max 3회):
-1. 생성된 target_id가 유효한가?
-2. SELECT면 value가 options에 있는가?
-3. 실패 시: 모든 valid ID 힌트 제공 후 재시도
-4. 최종 실패 시: Stage 2 결과로 fallback
+- [ ] `somenna_submission.csv` 행 수 일치
+- [ ] op ∈ {CLICK, TYPE, SELECT}
+- [ ] CLICK의 value = `""`
+- [ ] target_id가 해당 row의 candidate 중 하나
+- [ ] 결측값 없음 (`fillna("")`)
+- [ ] artifacts/inference_report.json 확인 (fallback 비율, guard 통계)
 
 ---
 
-## 6. SFT 데이터 구성
+## 다음 개선 후보
 
-```python
-def build_training_example(row):
-    """train.csv 행 → SFT 학습 예시"""
-    cands = json.loads(row['candidate_elements'])
-    history = str(row['history'])
-    
-    # 입력: task + history_clean + candidates_formatted
-    prompt = f"""### Task: {row['task']}
-### History: {clean_history_context(history)}
-### Candidates:
-{format_candidates(cands)}"""
-    
-    # 출력: Chain-of-Thought + JSON
-    step_num = get_current_step_num(history)
-    output = {
-        "reasoning": f"Step {step_num}: {cands[...]['text']} 선택 필요",
-        "op": row['op'],
-        "target_id": row['target_id'],
-        "value": str(row['value']) if pd.notna(row['value']) else ''
-    }
-    
-    return {
-        "instruction": "웹 UI 에이전트의 다음 액션을 정확히 예측하세요.",
-        "input": prompt,
-        "output": json.dumps(output, ensure_ascii=False)
-    }
-```
-
----
-
-## 7. LoRA Fine-Tuning 설정
-
-```python
-# Qwen2.5-7B + Unsloth 4-bit
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=16,
-    target_modules=[
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"  # 7개 모듈
-    ],
-    lora_alpha=32,
-    lora_dropout=0.05,
-    use_gradient_checkpointing="unsloth",
-)
-
-# SFT 설정
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=train_dataset,
-    dataset_text_field="text",
-    max_seq_length=2048,
-    dataset_num_proc=2,
-    args=TrainingArguments(
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=4,
-        num_train_epochs=3,
-        learning_rate=2e-4,
-        warmup_ratio=0.1,
-        save_steps=200,
-        logging_steps=50,
-    ),
-)
-```
-
----
-
-## 8. 데이터 분석 스크립트
-
-```python
-import pandas as pd
-import json
-
-train = pd.read_csv('data/train.csv')
-
-# 1. 기본 통계
-print("op 분포:", train['op'].value_counts())
-print("고유 site:", train['site_token'].nunique())
-
-# 2. Value-Task 관계
-def value_in_task(row):
-    if row['op'] == 'CLICK':
-        return True
-    return str(row['value']).lower() in str(row['task']).lower()
-
-train['in_task'] = train.apply(value_in_task, axis=1)
-print(f"Value in task: {train[train['op']!='CLICK']['in_task'].mean():.2%}")
-
-# 3. Site-template 일관성
-from collections import Counter
-
-step_nums = train['history'].apply(get_current_step_num)
-site_steps = train.groupby(['site_token', step_nums])['target_label'].apply(
-    lambda x: Counter(x).most_common(1)[0][1] / len(x)
-)
-print(f"Template consistency: {site_steps.mean():.2%}")
-
-# 4. Tag-Op 상관도
-for tag in ['button', 'input', 'select']:
-    filtered = train[train['target_tag'] == tag]
-    print(f"{tag}: {filtered['op'].mode()[0]} ({filtered['op'].value_counts()[filtered['op'].mode()[0]] / len(filtered):.1%})")
-```
-
----
-
-## 9. 구현 로드맵
-
-### Phase 1: 베이스라인 (★★★★★)
-- [ ] History 파싱 + clean 함수 검증
-- [ ] Site-template 추출
-- [ ] Stage 1 + Stage 2 구현
-- [ ] Train 검증 세트 (80/20) 평가 → 목표 >65%
-- [ ] 첫 제출 (rule-based)
-
-### Phase 2: LLM (★★★★)
-- [ ] SFT 데이터 생성 (clean_history 적용)
-- [ ] Qwen2.5-7B Unsloth SFT (1000 steps)
-- [ ] Repair Loop + validation 구현
-- [ ] 검증 후 제출
-
-### Phase 3: 최적화 (★★★)
-- [ ] Rule + LLM 앙상블 (confidence 기반)
-- [ ] 에러 분석 → 집중 개선
-- [ ] 최종 제출 (20-30회)
-
----
-
-## 10. 성능 예상
-
-| 단계 | Exact Match | 비고 |
-|------|------------|------|
-| Stage 1 (seen site) | ~80% | op/label 결정적 |
-| Stage 1+2 (seen site) | ~68-72% | value 추출 한계 |
-| Stage 1+2 (all) | ~50-55% | unseen site 약함 |
-| LLM SFT | ~75-80% | 의미론적 이해 |
-| **Stage 1+2+3 앙상블** | **~83-88%** | 각 강점 조합 |
-
----
-
-## 11. 버그 수정 (v3 노트북)
-
-| 위치 | 버그 | 수정 |
-|------|------|------|
-| Cell 5 | `row['expected_output']` 없음 | 위의 `build_training_example` 사용 |
-| Cell 9 | somenna_submission 읽기 | sample_submission.csv로 변경 |
-| Cell 9 | Repair Loop 5개 ID만 | 모든 valid_ids 제공 |
-| prompt 생성 | SELECT options 없음 | `parse_select_options` 추가 |
-| LoRA | 2개 모듈만 | 7개 모듈로 확장 |
-
----
-
-제출 체크리스트:
-```
-[ ] 모든 id 포함 (sample_submission 행 수 확인)
-[ ] op: CLICK/TYPE/SELECT만
-[ ] CLICK의 value = ""
-[ ] target_id: 해당 row의 candidate 중 하나
-[ ] 결측값 없음
-```
-
-*작성일: 2026-04-29*
+- TYPE value 추출 정밀도 향상
+- OOF error analysis → 오류 패턴 타겟 개선
+- 최종 제출 전 `FINAL_TRAIN_ON_FULL_DATA = True`로 전체 데이터 학습

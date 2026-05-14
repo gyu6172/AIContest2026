@@ -31,13 +31,13 @@ from retrieval import ExampleRetriever
 # ─────────────────────────────────────────────
 # 런타임 설정
 # ─────────────────────────────────────────────
-MAX_SEQ_LENGTH        = 16384   # A100 80GB: 확장된 컨텍스트 지원
-BATCH_SIZE            = 64      # 긴 컨텍스트 사용 시 OOM 방지를 위해 조절
-CSV_CHUNK_SIZE        = 512
+MAX_SEQ_LENGTH        = 4096
+BATCH_SIZE            = 128     # 80GB VRAM Monster Pass
+CSV_CHUNK_SIZE        = 512     # 청크 단위 상향
 USE_RETRIEVAL         = True
 USE_CONSISTENCY       = True
 OOF_N_FOLDS           = 3
-EXPERIMENT_E3         = True
+EXPERIMENT_E3         = True    # 32B는 compact prompt가 효율적
 
 # ─────────────────────────────────────────────
 # 추론 통계

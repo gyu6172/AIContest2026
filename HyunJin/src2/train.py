@@ -32,23 +32,23 @@ from retrieval import ExampleRetriever
 # ─────────────────────────────────────────────
 # 런타임 플래그 (변경해야 할 설정은 여기서만)
 # ─────────────────────────────────────────────
-MAX_SEQ_LENGTH            = 8192  # 35B 모델 VRAM 최적화
-EVAL_SAMPLE_SIZE          = 1000  # 검증 샘플 확대
-USE_RETRIEVAL             = True
+MAX_SEQ_LENGTH            = 4096
+EVAL_SAMPLE_SIZE          = 500   # 80GB에서는 더 넓은 샘플로 검증 가능
+USE_RETRIEVAL             = True  # RAG 복구
 USE_CONSISTENCY           = True
-VALIDATION_MODE           = True
-FINAL_TRAIN_ON_FULL_DATA  = False
-USE_DPO                   = True
+VALIDATION_MODE           = True  # False 로 바꾸면 전체 데이터 학습
+FINAL_TRAIN_ON_FULL_DATA  = False # True 로 바꾸면 val 없이 전체 학습
+USE_DPO                   = True  # SFT 대신 DPO 사용 여부
 
-# 학습 제외할 site_token
+# 학습 제외할 site_token (CLICK 편향 + test에 없음 — 팀원 분석)
 EXCLUDE_SITES = {"site_2aa627db"}
 
 # Augmentation & OOF
-SHUFFLE_AUGMENT_N    = 1
-OOF_N_FOLDS          = 3
+SHUFFLE_AUGMENT_N    = 1          # 원본 1 + 셔플 N = (1+N)배 데이터 (real_web은 2배 적용)
+OOF_N_FOLDS          = 3          # OOF fold 수
 
-# ── Qwen3.6-35B-A3B Optimized 4-bit ──
-BASE_MODEL_ID = "unsloth/Qwen3.6-35B-A3B-4bit"
+# ── Qwen3-32B Unsloth 4bit + 단일 A100 80GB (최신 Qwen3 적용) ──
+BASE_MODEL_ID = "unsloth/Qwen3-32B-unsloth-bnb-4bit"
 LORA_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
@@ -56,11 +56,13 @@ LORA_TARGET_MODULES = [
 LORA_R = 16
 LORA_ALPHA = 32
 
-DPO_PER_DEVICE_BATCH   = 4
-DPO_GRAD_ACCUM_STEPS   = 8
+# DPO는 (chosen+rejected)로 메모리 부담이 크지만, 32B 4bit + 80GB면 아래가 일반적으로 여유 있음.
+# OOM 시 DPO_PER_DEVICE_BATCH만 8 -> 4 순으로 낮출 것.
+DPO_PER_DEVICE_BATCH   = 32
+DPO_GRAD_ACCUM_STEPS   = 1
 
-SFT_PER_DEVICE_BATCH   = 8
-SFT_GRAD_ACCUM_STEPS   = 4
+SFT_PER_DEVICE_BATCH   = 64
+SFT_GRAD_ACCUM_STEPS   = 1
 
 DATALOADER_NUM_WORKERS = 8
 SFT_DATASET_NUM_PROC   = 8
@@ -158,6 +160,8 @@ def extract_json_answer(response, candidates):
 # 학습 데이터 생성
 # ─────────────────────────────────────────────
 
+from tqdm import tqdm
+
 def prepare_training_data(
     df,
     retriever=None,
@@ -165,14 +169,7 @@ def prepare_training_data(
     realweb_aug_boost: int = 1,
     compact_prompt: bool = False,
 ):
-    """DPO 또는 SFT용 학습 데이터를 생성한다.
-
-    WEPO 프레임워크 적용 (DPO Mode):
-    1. Chosen: 정답 요소 (aw)
-    2. Rejected: LCA 거리가 가장 가까운 오답 요소 (al).
-       - 변별력 극대화를 위해 op/value는 chosen과 동일하게 유지 (요소 선택에만 집중).
-    3. f_op 휴리스틱: 정답이 TYPE/SELECT면 오답을 33% 확률로 CLICK으로 변조하여 기능적 변별력 추가.
-    """
+    """DPO 또는 SFT용 학습 데이터를 생성한다."""
     mode_str = "DPO" if USE_DPO else "SFT"
     print(
         f"Preparing training data ({mode_str} Mode, shuffle_n={shuffle_n}, "
@@ -181,7 +178,7 @@ def prepare_training_data(
     instructions = []
     skipped = 0
 
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Generating Training Data"):
         try:
             candidates = json.loads(row["candidate_elements"])
         except Exception:
