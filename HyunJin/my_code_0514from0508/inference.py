@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import csv
-import argparse
 import json
 import os
 import re
@@ -9,8 +8,6 @@ from typing import Any
 import pandas as pd
 from tqdm import tqdm
 from unsloth import FastLanguageModel
-
-from collections import Counter
 
 from preprocess import (
     enforce_consistency,
@@ -22,8 +19,8 @@ from preprocess import (
     choice_to_candidate_id,
     get_consistency_debug,
     build_prompt,
-    rerank_candidates_by_embedding,
     RETRIEVAL_K,
+    rerank_candidates_by_embedding,
 )
 from retrieval import ExampleRetriever
 
@@ -31,45 +28,17 @@ from retrieval import ExampleRetriever
 # ─────────────────────────────────────────────
 # 런타임 설정
 # ─────────────────────────────────────────────
-MAX_SEQ_LENGTH        = 16384   # A100 80GB: 확장된 컨텍스트 지원
-BATCH_SIZE            = 64      # 긴 컨텍스트 사용 시 OOM 방지를 위해 조절
+MAX_SEQ_LENGTH        = 4096    # A100 80GB: DeepSeek-R1 사고 공간 확보
+BATCH_SIZE            = 64      # A100 80GB
 CSV_CHUNK_SIZE        = 512
-USE_RETRIEVAL         = True
+USE_RETRIEVAL         = False # RAG 비활성화 (사용자 요청)
 USE_CONSISTENCY       = True
 OOF_N_FOLDS           = 3
-EXPERIMENT_E3         = True
-
-# ─────────────────────────────────────────────
-# 추론 통계
-# ─────────────────────────────────────────────
-STATS = Counter()
-
-
-def reset_stats():
-    STATS.clear()
-
-
-def get_stats():
-    return dict(STATS)
 
 
 # ─────────────────────────────────────────────
 # JSON 파싱
 # ─────────────────────────────────────────────
-
-def _parse_json_safe(text: str) -> dict | None:
-    """중괄호가 중첩되지 않는 마지막 JSON 블록부터 역순으로 파싱 시도.
-
-    모델이 thinking 도중 { } 를 사용해도 맨 끝 JSON만 파싱되도록 보장.
-    """
-    candidates_json = list(re.finditer(r'\{[^{}]*\}', text, re.DOTALL))
-    for m in reversed(candidates_json):
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            continue
-    return None
-
 
 def extract_json_answers(responses: list[str],
                          candidates_list: list[list[dict]]) -> list[tuple[str, str, str]]:
@@ -77,12 +46,13 @@ def extract_json_answers(responses: list[str],
     results = []
     for resp, candidates in zip(responses, candidates_list):
         try:
-            # Qwen3 thinking: </think> 이후만 파싱 (없으면 전체에서 역순 탐색)
+            # 사고 과정(thinking) 제외하고 실제 JSON 부분만 추출 시도
             search_text = resp.split('</think>', 1)[-1] if '</think>' in resp else resp
-            data = _parse_json_safe(search_text)
-            if data is None:
+            match = re.search(r'\{[^{}]*\}', search_text, re.DOTALL)
+            if not match:
                 results.append(("CLICK", "", ""))
                 continue
+            data  = json.loads(match.group(0))
             op    = str(data.get("op", "CLICK")).upper()
             if op not in ("CLICK", "TYPE", "SELECT"):
                 op = "CLICK"
@@ -133,7 +103,7 @@ def _run_llm_batch(batch: list[dict[str, Any]], model, tokenizer) -> list[dict[s
 
     outputs = model.generate(
         **inputs,
-        max_new_tokens  = 512,    # Qwen3 thinking + CoT + JSON
+        max_new_tokens  = 512,    # R1 Thinking + JSON
         use_cache       = True,
         do_sample       = False,
         pad_token_id    = tokenizer.eos_token_id,
@@ -144,19 +114,14 @@ def _run_llm_batch(batch: list[dict[str, Any]], model, tokenizer) -> list[dict[s
     answers       = extract_json_answers(responses, [item["candidates"] for item in batch])
 
     records = []
-    for item, (op, target_id, value), raw_resp in zip(batch, answers, responses):
+    for item, (op, target_id, value) in zip(batch, answers):
         candidates = item["candidates"]
         valid_ids  = {str(c.get("candidate_id", "")) for c in candidates}
         row        = item["row"]
 
-        STATS["total"] += 1
-        if "</think>" in raw_resp:
-            STATS["thinking_used"] += 1
-
         if str(target_id) not in valid_ids:
             # choice 변환 실패 → rule-based fallback
             pred = fallback_rule_based(row, candidates)
-            STATS["llm_fallback_invalid_target"] += 1
         else:
             matched = next(
                 (c for c in candidates if str(c.get("candidate_id", "")) == str(target_id)),
@@ -173,7 +138,6 @@ def _run_llm_batch(batch: list[dict[str, Any]], model, tokenizer) -> list[dict[s
                 final_value = ""
 
             pred = {"op": op, "target_id": target_id, "value": final_value}
-            STATS["llm_success"] += 1
 
         pred["_task"] = row["task"]
         if USE_CONSISTENCY:
@@ -186,63 +150,7 @@ def _run_llm_batch(batch: list[dict[str, Any]], model, tokenizer) -> list[dict[s
 # 메인
 # ─────────────────────────────────────────────
 
-def _save_report(base_dir: str, final_sub):
-    import json
-    from datetime import datetime
-
-    stats     = get_stats()
-    guard     = get_consistency_debug()
-    total     = stats.get("total", 1)
-    llm_ok    = stats.get("llm_success", 0)
-    llm_fb    = stats.get("llm_fallback_invalid_target", 0)
-    think     = stats.get("thinking_used", 0)
-    rule_only = stats.get("no_model_rule_only", 0)
-
-    report = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "total_rows": total,
-        "source": {
-            "llm_success":              {"n": llm_ok,    "pct": f"{llm_ok/total:.1%}"},
-            "llm_fallback_bad_target":  {"n": llm_fb,    "pct": f"{llm_fb/total:.1%}"},
-            "no_model_rule_only":       {"n": rule_only, "pct": f"{rule_only/total:.1%}"},
-        },
-        "thinking_used": {"n": think, "pct": f"{think/max(llm_ok+llm_fb,1):.1%}"},
-        "consistency_guard": {
-            k: {"n": v, "pct": f"{v/total:.1%}"} for k, v in sorted(guard.items())
-        },
-        "op_dist": dict(final_sub["op"].value_counts()),
-    }
-
-    # 콘솔 출력
-    print("\n" + "="*55)
-    print("  INFERENCE REPORT")
-    print("="*55)
-    print(f"  Total rows        : {total}")
-    print(f"  LLM success       : {llm_ok:>5}  ({llm_ok/total:.1%})")
-    print(f"  LLM fallback      : {llm_fb:>5}  ({llm_fb/total:.1%})  ← target 무효")
-    print(f"  Rule-only (no LLM): {rule_only:>5}  ({rule_only/total:.1%})")
-    print(f"  Thinking used     : {think:>5}  ({think/max(llm_ok+llm_fb,1):.1%})  ← <think> 토큰 확인")
-    print("-"*55)
-    print("  Consistency Guard repairs:")
-    if guard:
-        for k, v in sorted(guard.items(), key=lambda x: -x[1]):
-            print(f"    {k:<35}: {v:>4}  ({v/total:.1%})")
-    else:
-        print("    (없음)")
-    print("="*55 + "\n")
-
-    # JSON 저장
-    artifacts_dir = os.path.join(base_dir, "artifacts")
-    os.makedirs(artifacts_dir, exist_ok=True)
-    report_path = os.path.join(artifacts_dir, "inference_report.json")
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"Report saved: {report_path}")
-
-
-def main(e3_compact_prompt: bool = EXPERIMENT_E3):
-    global EXPERIMENT_E3
-    EXPERIMENT_E3 = bool(e3_compact_prompt)
+def main():
     base_dir        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_path      = os.path.join(base_dir, "data", "train.csv")
     test_path       = os.path.join(base_dir, "data", "test.csv")
@@ -252,26 +160,34 @@ def main(e3_compact_prompt: bool = EXPERIMENT_E3):
     train_df  = pd.read_csv(train_path)
     retriever = ExampleRetriever().build(train_df) if USE_RETRIEVAL else None
 
-    print("2. Loading LLM (LoRA bundle)...")
+    print("2. Loading LLM...")
     lora_dir = os.path.join(base_dir, "lora_model")
     model, tokenizer = None, None
     if os.path.exists(lora_dir):
+        # Trained LoRA가 있으면 해당 어댑터를 로드 (Base는 어댑터 설정에 기록됨)
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name    = lora_dir,
             max_seq_length = MAX_SEQ_LENGTH,
             load_in_4bit  = True,
         )
+    else:
+        # LoRA가 없으면 사용자가 요청한 최신 Base 모델 로드
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name    = "unsloth/Qwen3.6-35B-A3B-bnb-4bit",
+            max_seq_length = MAX_SEQ_LENGTH,
+            load_in_4bit  = True,
+        )
+    
+    if model:
         FastLanguageModel.for_inference(model)
         tokenizer.padding_side   = "left"
         tokenizer.truncation_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-    else:
-        print("  lora_model not found — using rule-based fallback only")
 
-    print("3. Running streaming inference (Dual-flow)...")
-    final_results    = []
-    llm_batch        = []
+    print("3. Running streaming inference...")
+    final_results = []
+    llm_batch     = []
 
     def flush_llm_batch():
         nonlocal llm_batch
@@ -289,52 +205,29 @@ def main(e3_compact_prompt: bool = EXPERIMENT_E3):
             except Exception:
                 candidates = []
 
+            # real_web이면 임베딩 기준 재정렬 (workflow는 원본 순서 유지)
+            if detect_html_type(row) == "real_web":
+                candidates = rerank_candidates_by_embedding(str(row.get("task", "")), candidates)
+
             if model is None:
                 pred = fallback_rule_based(row, candidates)
                 pred["_task"] = row["task"]
                 if USE_CONSISTENCY:
                     pred = enforce_consistency(pred, candidates)
                 final_results.append(_clean_submission_record(q_id, pred))
-                STATS["total"] += 1
-                STATS["no_model_rule_only"] += 1
                 continue
 
-            html_type = detect_html_type(row)
-
-            # [Flow A] Workflow: RAG + Progress Status
-            if html_type == "workflow":
-                prompt = build_prompt(
-                    row,
-                    candidates,
-                    retriever=retriever,
-                    k=RETRIEVAL_K,
-                    compact_candidates=EXPERIMENT_E3,
-                )
-                llm_batch.append({
-                    "id":         q_id,
-                    "text":       f"### Instruction:\n{prompt}\n\n### Response:\n<think>\n",
-                    "candidates": candidates,
-                    "row":        row,
-                })
-
-            # [Flow B] Real Web: Rerank + Intensive Thinking Mode
-            else:
-                # Universal Reranking is now inside build_prompt, 
-                # but we can apply additional logic here if needed.
-                prompt = build_prompt(
-                    row,
-                    candidates,
-                    retriever=retriever,
-                    k=RETRIEVAL_K,
-                    compact_candidates=EXPERIMENT_E3,
-                )
-                llm_batch.append({
-                    "id":         q_id,
-                    "text":       f"### Instruction:\n{prompt}\n\n### Response:\n<think>\n",
-                    "candidates": candidates,
-                    "row":        row,
-                })
-
+            prompt = build_prompt(
+                row, candidates,
+                retriever=retriever,
+                k=RETRIEVAL_K,
+            )
+            llm_batch.append({
+                "id":         q_id,
+                "text":       f"### Instruction:\n{prompt}\n\n### Response:\n<think>\n",
+                "candidates": candidates,
+                "row":        row,
+            })
             if len(llm_batch) >= BATCH_SIZE:
                 flush_llm_batch()
 
@@ -360,17 +253,13 @@ def main(e3_compact_prompt: bool = EXPERIMENT_E3):
     final_sub.to_csv(out_path, index=False, quoting=csv.QUOTE_NONNUMERIC)
     print(f"Saved: {out_path}  ({len(final_sub)} rows)")
     print(f"op dist: {dict(final_sub['op'].value_counts())}")
-
-    _save_report(base_dir, final_sub)
-
+    print(f"consistency repairs: {get_consistency_debug()}")
 
 
-def ensemble_main(e3_compact_prompt: bool = False):
+def ensemble_main():
     """3-Fold OOF 앙상블 추론: 각 fold 모델의 예측을 다수결로 결합."""
     from collections import Counter
     import torch
-    global EXPERIMENT_E3
-    EXPERIMENT_E3 = bool(e3_compact_prompt)
 
     base_dir        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_path      = os.path.join(base_dir, "data", "train.csv")
@@ -394,7 +283,7 @@ def ensemble_main(e3_compact_prompt: bool = False):
             print(f"  Fold {fold} model not found at {lora_dir}, skipping")
             continue
 
-        print(f"\n2-{fold}. Loading fold {fold} LoRA bundle...")
+        print(f"\n2-{fold}. Loading fold {fold} model...")
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name     = lora_dir,
             max_seq_length = MAX_SEQ_LENGTH,
@@ -424,16 +313,10 @@ def ensemble_main(e3_compact_prompt: bool = False):
             except Exception:
                 candidates = []
 
-            html_type = detect_html_type(row)
+            if detect_html_type(row) == "real_web":
+                candidates = rerank_candidates_by_embedding(str(row.get("task", "")), candidates)
 
-            # Dual-flow logic preserved in ensemble
-            prompt = build_prompt(
-                row,
-                candidates,
-                retriever=retriever,
-                k=RETRIEVAL_K,
-                compact_candidates=EXPERIMENT_E3,
-            )
+            prompt = build_prompt(row, candidates, retriever=retriever, k=RETRIEVAL_K)
             llm_batch.append({
                 "id":         q_id,
                 "text":       f"### Instruction:\n{prompt}\n\n### Response:\n<think>\n",
@@ -509,21 +392,8 @@ def ensemble_main(e3_compact_prompt: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ensemble", action="store_true", help="Run OOF ensemble inference mode.")
-    parser.add_argument(
-        "--e1",
-        action="store_true",
-        help="E1: for no-survivor tournament rows, retry once with op-fixed constraint.",
-    )
-    parser.add_argument(
-        "--e3",
-        action="store_true",
-        help="E3: use compact candidate formatting in prompts.",
-    )
-    args = parser.parse_args()
-
-    if args.ensemble:
-        ensemble_main(e3_compact_prompt=args.e3)
+    import sys
+    if "--ensemble" in sys.argv:
+        ensemble_main()
     else:
-        main(e1_no_survivor_retry=args.e1, e3_compact_prompt=args.e3)
+        main()

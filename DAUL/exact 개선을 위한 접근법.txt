@@ -1,0 +1,90 @@
+1. 현재 문제 상황
+- 현재 최종 제출본(somenna_submission_probe_m12_h2b2.csv)의 성적:
+  - Exact Public Accuracy: 0.7543
+  - op Accuracy: 0.9744
+  - target Accuracy: 0.7852
+  - value Accuracy: 0.9606
+  - Coverage: 98.0%
+  - Answered: 4328 / 4417
+- op와 value는 이미 높은 수준이므로, exact 점수를 끌어올리는 핵심 병목은 target 정확도임.
+- Exact 0.85 이상을 달성하려면 target 정확도를 현재 0.785 수준에서 최소 약 0.885 이상으로 올려야 함.
+
+2. 데이터 구조 분석
+- train/test 데이터는 크게 두 종류로 나뉨.
+  1) synthetic workflow 데이터
+     - workflow-context, current step n of m 같은 정보가 있음.
+     - 템플릿 기반으로 예측 가능하며 현재 거의 해결된 것으로 보임.
+  2) real web 데이터
+     - 실제 웹페이지 DOM 기반 데이터.
+     - target 예측이 어려운 핵심 구간.
+- 전체 target 정확도 저하의 주요 원인은 real web 데이터에서 target을 제대로 고르지 못하는 것임.
+
+3. target 정확도가 낮은 근본 원인
+- candidate_elements 안의 정보만으로는 target을 고르기 어려운 경우가 많음.
+- 실제 train에서 정답 target 중 상당수가 text와 attrs가 모두 비어 있음.
+  예: tag는 a/button/div 등인데 text와 attrs가 빈 값.
+- 하지만 cleaned_html 안에는 실제 표시 텍스트, 부모/자식 노드, 주변 문맥이 존재할 가능성이 큼.
+- 따라서 candidate_elements만 보는 방식은 구조적으로 한계가 있음.
+
+4. 핵심 해결 방향
+- candidate_elements의 각 candidate를 cleaned_html의 DOM node와 다시 연결해야 함.
+- candidate 자체 정보뿐 아니라 DOM 문맥을 복원해야 함.
+- 각 candidate에 대해 다음 정보를 feature로 만들어야 함:
+  - tag, text, attrs, candidate index
+  - descendant text: 자식 노드까지 포함한 실제 표시 텍스트
+  - parent/ancestor text: 부모 및 조상 노드의 텍스트
+  - nearby text: DOM상 앞뒤 주변 텍스트
+  - form/dialog/section context
+  - sibling context
+  - aria-label, name, placeholder, type 등 HTML 속성
+  - page heading, site_token, history와의 관련도
+
+5. 모델링 방향
+- target_id를 직접 분류하는 방식은 적절하지 않음.
+- target은 매 row마다 주어진 후보 중 하나를 고르는 문제이므로 candidate ranking 문제로 바꿔야 함.
+- 각 row의 candidate들을 펼쳐서 정답 candidate는 label=1, 나머지는 label=0으로 학습.
+- 추천 방식:
+  1) 빠른 실험용: LightGBM/CatBoost ranking 모델
+  2) 최종 성능용: Cross-Encoder 또는 LLM-style reranker
+
+6. op/value는 유지, target만 별도 개선
+- 현재 op/value 정확도는 높으므로 전체 모델을 갈아엎기보다 target 전용 ranker를 추가하는 것이 안전함.
+- 기존 제출본의 op/value는 유지하고, real web target만 재예측하는 전략이 좋음.
+- ranker confidence가 높을 때만 기존 target을 교체하면 public 점수 하락 위험을 줄일 수 있음.
+
+7. 검증 방식
+- 단순 랜덤 split만 사용하면 성능이 과대평가될 수 있음.
+- 다음 검증을 따로 봐야 함:
+  - 전체 CV
+  - synthetic CV
+  - real web CV
+  - real web target accuracy
+  - real web exact accuracy
+- site_token 기준 group split도 사용하여 새로운 사이트에 대한 일반화 성능을 확인해야 함.
+
+8. 추천 진행 순서
+1) 데이터를 synthetic workflow와 real web으로 분리한다.
+2) synthetic 구간은 현재 방식 또는 템플릿 기반 방식을 유지한다.
+3) real web 구간에서 candidate와 cleaned_html DOM node를 재매핑한다.
+4) candidate별 DOM 문맥 feature를 생성한다.
+5) target candidate ranking 모델을 학습한다.
+6) hard negative를 강화한다.
+   - 같은 tag지만 다른 의미의 후보
+   - 텍스트가 비슷한 후보
+   - 같은 form/dialog 안의 다른 버튼
+   - 빈 text/attrs를 가진 a, div, li 후보 등
+7) 기존 제출본과 앙상블한다.
+8) confidence가 높은 target만 교체하면서 점수 변화를 확인한다.
+
+9. 목표 수치
+- 현재 전체 target Accuracy: 약 0.785
+- 목표 전체 target Accuracy: 약 0.885 이상
+- 현재 real web target은 약 57% 수준으로 추정됨.
+- 목표는 real web target을 약 77~80% 이상으로 끌어올리는 것.
+- 이를 달성하면 Exact 0.85 이상을 노려볼 수 있음.
+
+10. 결론
+- op/value가 아니라 real web 데이터의 target 예측이 중요.
+- 근본 해결책은 candidate 자체 정보만 보는 방식에서 벗어나 cleaned_html의 DOM 문맥을 복원하는 것이다.
+- target 예측은 target_id 분류가 아니라 candidate ranking 문제로 접근해야 한다.
+- DOM context 복원 + target ranker + confidence 기반 앙상블이 Exact 0.85 이상을 위한 가장 현실적인 전략이다.
