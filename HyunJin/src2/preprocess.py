@@ -958,9 +958,9 @@ def find_lca_hard_negative(row, candidates, target_id):
 # ─────────────────────────────────────────────
 # RAG 포맷팅 & 프롬프트 빌더
 # ─────────────────────────────────────────────
-RETRIEVAL_K             = 5     # 80GB VRAM: 더 많은 사례(Few-shot) 수용
-RETRIEVAL_TASK_CHARS    = 200
-RETRIEVAL_HISTORY_CHARS = 200
+RETRIEVAL_K             = 3
+RETRIEVAL_TASK_CHARS    = 150
+RETRIEVAL_HISTORY_CHARS = 150
 
 
 def format_similar_examples(examples, max_task_chars=None, max_history_chars=None):
@@ -993,7 +993,7 @@ def build_prompt(
     compact_candidates: bool = False,
     use_rerank: bool = True,
 ):
-    """Optimized English-only prompt for UI-TARS / Qwen2.5 Agentic Reasoning."""
+    """Optimized English-only prompt for Qwen3-32B Agentic Reasoning."""
     from bs4 import BeautifulSoup
 
     html_type   = detect_html_type(row)
@@ -1021,18 +1021,18 @@ def build_prompt(
 
     # 4. Thinking Guidelines (Force logical grounding in English)
     reasoning_guideline = """[Reasoning Guidelines]
-1. Task Goal: Understand the current objective from 'Task' and 'History'.
-2. Element Analysis: Look for labels, IDs, ARIA roles, or values in 'Candidate Elements' that match the goal.
-3. Contrast: If multiple elements look similar, use their A-Tree hierarchy (ancestors) to distinguish them.
-4. Consistency: Ensure the predicted operation (CLICK/TYPE/SELECT) matches the element's tag (e.g., TYPE into input).
-5. Output: Provide reasoning in <think> tags, followed by the JSON action."""
+1. Analyze the 'Task' and 'History' to identify the current objective.
+2. Scan the 'Candidate Elements' (A-Tree) for labels, IDs, or ARIA attributes that match the task requirements.
+3. Reference 'Similar Past Examples' to see how similar tasks were successfully handled.
+4. Distinguish between similar elements by checking their structural paths (ancestors) and surrounding neighbors.
+5. Select the single best element and determine the correct operation (CLICK, TYPE, or SELECT)."""
 
     # 5. Core Instruction Assembly
-    role_instruction = "You are a specialized Web UI automation agent. Predict the next action to fulfill the task."
+    role_instruction = "You are a specialized Web UI automation agent. Your goal is to predict the next correct action based on the current state of the web page."
     
     prompt = f"""{role_instruction}
 
-{rag_block}[Candidate Elements] (Total: {n})
+{rag_block}[Candidate Elements] (Ranked by relevance, 1-{n})
 {numbered}
 
 [Task]
@@ -1044,15 +1044,16 @@ def build_prompt(
 {reasoning_guideline}
 
 [Output Format]
-<think> (Brief step-by-step reasoning in English) </think>
-{{"op": "CLICK|TYPE|SELECT", "choice": <1-{n}>, "value": "string"}}"""
+Provide your internal reasoning process in English inside <think>...</think> tags.
+Then, output the final action in the following JSON format:
+{{"op": "CLICK|TYPE|SELECT", "choice": <number 1-{n}>, "value": "string or empty"}}"""
 
     # Add workflow-specific status if applicable
     if html_type == "workflow":
         ctx = extract_workflow_context(html_str)
-        workflow_hint = f"\n\n[Workflow Status]\nStep {ctx['current_step']} of {ctx['total_steps']}\n"
+        workflow_hint = f"\n\n[Workflow Status]\nProgress: step {ctx['current_step']} of {ctx['total_steps']}\n"
         if ctx["completed_fields"]:
-            workflow_hint += f"Completed Fields: {', '.join(ctx['completed_fields'])}\n"
+            workflow_hint += f"Completed: {', '.join(ctx['completed_fields'])} (Do NOT interact with these)\n"
         return prompt + workflow_hint
     
     return prompt
