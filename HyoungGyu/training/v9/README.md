@@ -1,7 +1,9 @@
 # v9 training pipeline
 
 This version is based on `hyunjin/src` and focuses on raw_web target_id
-disambiguation.
+disambiguation. The default model/profile is set for Colab T4/L4:
+`unsloth/Qwen3-8B-bnb-4bit`, batch size 1 for training, and conservative DPO
+sequence lengths.
 
 ## What changed
 
@@ -80,3 +82,5 @@ python train.py --e3
 python inference.py --e3
 ```
 
+On Colab T4, prefer `--e3` if you hit OOM. If memory is still tight, reduce
+`MAX_SEQ_LENGTH` in `train.py` and `inference.py` from `4096` to `2048`.

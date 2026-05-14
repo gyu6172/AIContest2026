@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import argparse
+import inspect
 import torch
 import pandas as pd
 import json
@@ -32,7 +33,7 @@ from retrieval import ExampleRetriever
 # ─────────────────────────────────────────────
 # 런타임 플래그 (변경해야 할 설정은 여기서만)
 # ─────────────────────────────────────────────
-MAX_SEQ_LENGTH            = 8192  # 35B 모델 VRAM 최적화
+MAX_SEQ_LENGTH            = 4096  # T4/L4 Colab friendly default
 EVAL_SAMPLE_SIZE          = 1000  # 검증 샘플 확대
 USE_RETRIEVAL             = True
 USE_CONSISTENCY           = True
@@ -47,8 +48,8 @@ EXCLUDE_SITES = {"site_2aa627db"}
 SHUFFLE_AUGMENT_N    = 1
 OOF_N_FOLDS          = 3
 
-# ── Qwen3.6-35B-A3B Optimized 4-bit ──
-BASE_MODEL_ID = "unsloth/Qwen3.6-35B-A3B-4bit"
+# Valid Unsloth 4-bit model. 35B variants do not fit on Colab T4.
+BASE_MODEL_ID = "unsloth/Qwen3-8B-bnb-4bit"
 LORA_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
@@ -56,14 +57,14 @@ LORA_TARGET_MODULES = [
 LORA_R = 16
 LORA_ALPHA = 32
 
-DPO_PER_DEVICE_BATCH   = 4
-DPO_GRAD_ACCUM_STEPS   = 8
+DPO_PER_DEVICE_BATCH   = 1
+DPO_GRAD_ACCUM_STEPS   = 16
 
-SFT_PER_DEVICE_BATCH   = 8
-SFT_GRAD_ACCUM_STEPS   = 4
+SFT_PER_DEVICE_BATCH   = 1
+SFT_GRAD_ACCUM_STEPS   = 16
 
-DATALOADER_NUM_WORKERS = 8
-SFT_DATASET_NUM_PROC   = 8
+DATALOADER_NUM_WORKERS = 2
+SFT_DATASET_NUM_PROC   = 2
 
 
 def configure_a100_throughput() -> None:
@@ -120,6 +121,16 @@ def _sft_training_kwargs():
         dataloader_pin_memory     = True,
         dataloader_persistent_workers = DATALOADER_NUM_WORKERS > 0,
     )
+
+
+def make_dpo_config(**kwargs):
+    """Build DPOConfig across TRL/Unsloth versions with slightly different args."""
+    supported = set(inspect.signature(DPOConfig.__init__).parameters)
+    supported.discard("self")
+    dropped = sorted(k for k in kwargs if k not in supported)
+    if dropped:
+        print(f"DPOConfig: ignored unsupported args for this TRL version: {dropped}")
+    return DPOConfig(**{k: v for k, v in kwargs.items() if k in supported})
 
 
 # ─────────────────────────────────────────────
@@ -514,7 +525,7 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
             ref_model        = None, # PEFT 시 None 이면 자동으로 생성
             processing_class = tokenizer,
             train_dataset    = dataset,
-            args = DPOConfig(
+            args = make_dpo_config(
                 **_dpo_training_kwargs(),
                 warmup_ratio               = 0.1,
                 num_train_epochs           = 1,
@@ -531,8 +542,8 @@ def train(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                 seed                       = 3407,
                 output_dir                 = os.path.join(base_dir, "outputs"),
                 beta                       = 0.1,
-                max_prompt_length          = 2048,
-                max_length                 = 4096,
+                max_prompt_length          = 1024,
+                max_length                 = 2048,
             ),
         )
     else:
@@ -649,7 +660,7 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                 ref_model        = None,
                 processing_class = tokenizer,
                 train_dataset    = dataset,
-                args = DPOConfig(
+                args = make_dpo_config(
                     **_dpo_training_kwargs(),
                     warmup_ratio               = 0.1,
                     num_train_epochs           = 1,
@@ -666,8 +677,8 @@ def train_oof(e2_realweb_boost: bool = False, e3_compact_prompt: bool = False):
                     seed                       = 3407 + fold,
                     output_dir                 = fold_output_dir,
                     beta                       = 0.1,
-                    max_prompt_length          = 2048,
-                    max_length                 = 4096,
+                    max_prompt_length          = 1024,
+                    max_length                 = 2048,
                 ),
             )
         else:
