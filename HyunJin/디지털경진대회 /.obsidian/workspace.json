@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "research/0512_analzye.md",
+                "file": "PIPELINE.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "0512_analzye"
+              "title": "PIPELINE"
             }
           }
         ]
@@ -78,7 +78,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 300,
+    "collapsed": true
   },
   "right": {
     "id": "d420417c4dfe553e",
@@ -94,7 +95,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "research/0512_analzye.md",
+                "file": "todo/0512_dpo_refactor_plan.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +105,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for 0512_analzye"
+              "title": "Backlinks for 0512_dpo_refactor_plan"
             }
           },
           {
@@ -113,12 +114,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "research/0512_analzye.md",
+                "file": "todo/0512_dpo_refactor_plan.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from 0512_analzye"
+              "title": "Outgoing links from 0512_dpo_refactor_plan"
             }
           },
           {
@@ -156,13 +157,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "research/0512_analzye.md",
+                "file": "todo/0512_dpo_refactor_plan.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of 0512_analzye"
+              "title": "Outline of 0512_dpo_refactor_plan"
             }
           }
         ]
@@ -185,20 +186,24 @@
   },
   "active": "4af3be30918f0651",
   "lastOpenFiles": [
+    "pipeline0508.md",
+    "PIPELINE.md",
+    "pipeline/EXPLAIN.md",
     "todo/0512_dpo_refactor_plan.md",
-    "todo",
-    "WEPO DPO Literature Review_latex/manuscript.pdf",
-    "research/0512_analzye.md",
-    "research/PAPER_ANALYZE.md",
+    "추론 방식 구체화.md",
     "research/STRATEGY.md",
+    "pipeline/GPU_PROFILES.md",
+    "research/PAPER_ANALYZE.md",
+    "research/0512_analzye.md",
     "manuscript.pdf",
+    "WEPO DPO Literature Review_latex/manuscript.pdf",
+    "todo",
     "WEPO DPO Literature Review_latex/sn-vancouver-num.bst",
     "WEPO DPO Literature Review_latex/sn-vancouver-ay.bst",
     "WEPO DPO Literature Review_latex/sn-nature.bst",
     "WEPO DPO Literature Review_latex/sn-mathphys-num.bst",
     "WEPO DPO Literature Review_latex/sn-mathphys-ay.bst",
     "WEPO DPO Literature Review_latex/sn-jnl.cls",
-    "WEPO DPO Literature Review_latex/sn-chicago.bst",
-    "pipeline/EXPLAIN.md"
+    "WEPO DPO Literature Review_latex/sn-chicago.bst"
   ]
 }
