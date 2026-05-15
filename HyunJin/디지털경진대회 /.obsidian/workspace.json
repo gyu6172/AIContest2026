@@ -11,14 +11,12 @@
             "id": "4af3be30918f0651",
             "type": "leaf",
             "state": {
-              "type": "markdown",
+              "type": "pdf",
               "state": {
-                "file": "PIPELINE.md",
-                "mode": "preview",
-                "source": false
+                "file": "manuscript.pdf"
               },
-              "icon": "lucide-file",
-              "title": "PIPELINE"
+              "icon": "lucide-file-text",
+              "title": "manuscript"
             }
           }
         ]
@@ -78,8 +76,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "right": {
     "id": "d420417c4dfe553e",
@@ -186,17 +183,17 @@
   },
   "active": "4af3be30918f0651",
   "lastOpenFiles": [
-    "pipeline0508.md",
-    "PIPELINE.md",
+    "WEPO DPO Literature Review_latex/manuscript.pdf",
+    "research/0512_analzye.md",
     "pipeline/EXPLAIN.md",
+    "pipeline/GPU_PROFILES.md",
+    "PIPELINE.md",
+    "pipeline0508.md",
     "todo/0512_dpo_refactor_plan.md",
     "추론 방식 구체화.md",
     "research/STRATEGY.md",
-    "pipeline/GPU_PROFILES.md",
     "research/PAPER_ANALYZE.md",
-    "research/0512_analzye.md",
     "manuscript.pdf",
-    "WEPO DPO Literature Review_latex/manuscript.pdf",
     "todo",
     "WEPO DPO Literature Review_latex/sn-vancouver-num.bst",
     "WEPO DPO Literature Review_latex/sn-vancouver-ay.bst",
