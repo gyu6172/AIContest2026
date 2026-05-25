@@ -1,0 +1,21 @@
+# Large archives - push bottleneck
+attempt/*.zip
+attempt/**/*.zip
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Model artifacts
+lora_model*/
+result/*/lora_model*/
+*.bin
+*.safetensors
+
+# OS
+.DS_Store
+Thumbs.db
